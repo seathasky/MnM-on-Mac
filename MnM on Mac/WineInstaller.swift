@@ -15,6 +15,106 @@ struct RuntimeAsset {
     static let wine = RuntimeAsset(label: "Wine", url: URL(string: "https://github.com/Sikarugir-App/Engines/releases/download/v1.0/WS12WineSikarugir10.0_6.tar.xz")!, sha256: "9da7ee0cbf386522f3a9906943726d9c3c125dbbd9ab120e3cde80e88d6091b2")
     static let graphics = RuntimeAsset(label: "DXMT graphics", url: URL(string: "https://github.com/3Shain/dxmt/releases/download/v0.80/dxmt-v0.80-builtin.tar.gz")!, sha256: "8f260e36b5739e68f3bad613381441385c4dc7b85b78ba8de653d5a6a264529d")
     static let libraries = RuntimeAsset(label: "Wine support libraries", url: URL(string: "https://github.com/Sikarugir-App/Wrapper/releases/download/v1.0/Template-1.0.11.tar.xz")!, sha256: "9fa15479e7ff6abd99c1d07be285fb95f41fc6991586502427152b1f7d6ccb8a")
+    static let dxvk = RuntimeAsset(label: "DXVK graphics", url: URL(string: "https://github.com/Gcenx/DXVK-macOS/releases/download/v1.10.3/dxvk-v1.10.3.tar.gz")!, sha256: "5644f5c02e8dc3e25171e6b7b5d16e927332b32136c6caf8e418e1192cc2e5d4")
+}
+
+struct DXVKInstaller {
+    let paths: WinePaths
+
+    func install(progress: @escaping (String) -> Void) throws {
+        if paths.dxvkInstalled { return }
+        let manager = FileManager.default
+        try manager.createDirectory(at: paths.runtime, withIntermediateDirectories: true)
+        let stage = paths.runtime.appendingPathComponent(".dxvk-download-\(UUID().uuidString)", isDirectory: true)
+        try manager.createDirectory(at: stage, withIntermediateDirectories: false)
+        defer { try? manager.removeItem(at: stage) }
+
+        let archive = stage.appendingPathComponent("dxvk.tar.gz")
+        progress("Downloading DXVK…")
+        try RuntimeDownload(destination: archive, label: RuntimeAsset.dxvk.label, progress: progress).fetch(RuntimeAsset.dxvk.url)
+        progress("Verifying DXVK…")
+        try WineInstaller.verify(archive, digest: RuntimeAsset.dxvk.sha256)
+
+        let extracted = stage.appendingPathComponent("extracted", isDirectory: true)
+        try WineInstaller.extract(archive, to: extracted)
+        let files = try WineInstaller.files(in: extracted)
+        let required = ["dxgi.dll", "d3d11.dll", "d3d10core.dll"]
+        let assembled = stage.appendingPathComponent("dxvk-macos-1.10.3", isDirectory: true)
+        try manager.createDirectory(at: assembled, withIntermediateDirectories: false)
+        for name in required {
+            let candidates = files.filter { $0.lastPathComponent == name && $0.pathComponents.contains("x64") }
+            guard candidates.count == 1 else {
+                throw PatcherSetupError.message("The DXVK package does not contain an unambiguous 64-bit \(name).")
+            }
+            try manager.copyItem(at: candidates[0], to: assembled.appendingPathComponent(name))
+        }
+        try "dxvk-macos-1.10.3".write(to: assembled.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
+
+        try manager.createDirectory(at: paths.dxvk.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if manager.fileExists(atPath: paths.dxvk.path) {
+            let old = stage.appendingPathComponent("previous", isDirectory: true)
+            try manager.moveItem(at: paths.dxvk, to: old)
+            do { try manager.moveItem(at: assembled, to: paths.dxvk) }
+            catch { try? manager.moveItem(at: old, to: paths.dxvk); throw error }
+        } else {
+            try manager.moveItem(at: assembled, to: paths.dxvk)
+        }
+    }
+}
+
+struct D3DMetalInstaller {
+    let paths: WinePaths
+
+    func install(progress: @escaping (String) -> Void) throws {
+        if paths.d3dMetalInstalled { return }
+        let manager = FileManager.default
+        try manager.createDirectory(at: paths.runtime, withIntermediateDirectories: true)
+        let stage = paths.runtime.appendingPathComponent(".d3dmetal-download-\(UUID().uuidString)", isDirectory: true)
+        try manager.createDirectory(at: stage, withIntermediateDirectories: false)
+        defer { try? manager.removeItem(at: stage) }
+
+        let archive = stage.appendingPathComponent("support.tar.xz")
+        progress("Downloading D3DMetal…")
+        try RuntimeDownload(destination: archive, label: "D3DMetal", progress: progress).fetch(RuntimeAsset.libraries.url)
+        progress("Verifying D3DMetal…")
+        try WineInstaller.verify(archive, digest: RuntimeAsset.libraries.sha256)
+
+        let names = try NativePatcherInstaller.command("/usr/bin/tar", ["-tf", archive.path]).split(separator: "\n").map(String.init)
+        let suffix = ".app/Contents/Frameworks/renderer/d3dmetal/"
+        let roots = Set(names.compactMap { name -> String? in
+            guard let range = name.range(of: suffix), !name.hasPrefix("/"), !name.split(separator: "/").contains("..") else { return nil }
+            return String(name[..<range.upperBound])
+        })
+        guard roots.count == 1, let root = roots.first else {
+            throw PatcherSetupError.message("The support package does not contain one unambiguous D3DMetal folder.")
+        }
+
+        let extractedRoot = stage.appendingPathComponent("extracted", isDirectory: true)
+        try WineInstaller.extract(archive, to: extractedRoot, members: [String(root.dropLast())])
+        let extracted = extractedRoot.appendingPathComponent(root, isDirectory: true)
+        let required = [
+            "wine/x86_64-windows/d3d11.dll",
+            "wine/x86_64-windows/dxgi.dll",
+            "wine/x86_64-unix/d3d11.so",
+            "wine/x86_64-unix/dxgi.so",
+            "external/libd3dshared.dylib",
+            "external/D3DMetal.framework/Versions/A/D3DMetal"
+        ]
+        guard required.allSatisfy({ manager.fileExists(atPath: extracted.appendingPathComponent($0).path) }) else {
+            throw PatcherSetupError.message("The support package contains an incomplete D3DMetal installation.")
+        }
+        try "d3dmetal-3.0-template-1.0.11".write(to: extracted.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
+
+        try manager.createDirectory(at: paths.d3dMetal.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if manager.fileExists(atPath: paths.d3dMetal.path) {
+            let old = stage.appendingPathComponent("previous", isDirectory: true)
+            try manager.moveItem(at: paths.d3dMetal, to: old)
+            do { try manager.moveItem(at: extracted, to: paths.d3dMetal) }
+            catch { try? manager.moveItem(at: old, to: paths.d3dMetal); throw error }
+        } else {
+            try manager.moveItem(at: extracted, to: paths.d3dMetal)
+        }
+    }
 }
 
 final class RuntimeDownload: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {

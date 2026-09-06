@@ -7,6 +7,17 @@
 
 import Foundation
 
+enum GraphicsBackend: String {
+    case metal
+    case dxvk
+    case d3dMetal = "d3dmetal"
+
+    static var requested: GraphicsBackend {
+        guard let value = ProcessInfo.processInfo.environment["MNM_GRAPHICS_BACKEND"] else { return .metal }
+        return GraphicsBackend(rawValue: value) ?? .metal
+    }
+}
+
 struct WinePaths {
     let support: URL
     static var current: WinePaths {
@@ -15,6 +26,12 @@ struct WinePaths {
     var runtime: URL { support.appendingPathComponent("Runtime/sikarugir-10.0_6-dxmt-0.80", isDirectory: true) }
     var engine: URL { runtime.appendingPathComponent("engine", isDirectory: true) }
     var libraries: URL { runtime.appendingPathComponent("Frameworks", isDirectory: true) }
+    var dxvk: URL { runtime.appendingPathComponent("Graphics/dxvk-macos-1.10.3", isDirectory: true) }
+    var dxvkPrefix: URL { support.appendingPathComponent("Prefix-DXVK-Test", isDirectory: true) }
+    var d3dMetal: URL { runtime.appendingPathComponent("Graphics/d3dmetal-3.0", isDirectory: true) }
+    var d3dMetalPrefix: URL { support.appendingPathComponent("Prefix-D3DMetal-Test", isDirectory: true) }
+    var graphicsLogs: URL { support.appendingPathComponent("Logs/DXVK", isDirectory: true) }
+    var graphicsCache: URL { support.appendingPathComponent("Cache/DXVK", isDirectory: true) }
     var setupLog: URL { support.appendingPathComponent("Logs/wine-setup.log") }
     var prefix: URL { support.appendingPathComponent("Prefix", isDirectory: true) }
     var game: URL { support.appendingPathComponent("Game/mnm", isDirectory: true) }
@@ -45,6 +62,23 @@ struct WinePaths {
     var librariesInstalled: Bool {
         FileManager.default.fileExists(atPath: libraries.appendingPathComponent("libinotify.0.dylib").path) &&
         (try? String(contentsOf: libraries.appendingPathComponent(".mnm-support-version"), encoding: .utf8)) == WineRuntime.supportVersion
+    }
+    var dxvkInstalled: Bool {
+        let required = ["dxgi.dll", "d3d11.dll", "d3d10core.dll"]
+        return required.allSatisfy { FileManager.default.fileExists(atPath: dxvk.appendingPathComponent($0).path) } &&
+        (try? String(contentsOf: dxvk.appendingPathComponent("version.txt"), encoding: .utf8)) == "dxvk-macos-1.10.3"
+    }
+    var d3dMetalInstalled: Bool {
+        let required = [
+            "wine/x86_64-windows/d3d11.dll",
+            "wine/x86_64-windows/dxgi.dll",
+            "wine/x86_64-unix/d3d11.so",
+            "wine/x86_64-unix/dxgi.so",
+            "external/libd3dshared.dylib",
+            "external/D3DMetal.framework/Versions/A/D3DMetal"
+        ]
+        return required.allSatisfy { FileManager.default.fileExists(atPath: d3dMetal.appendingPathComponent($0).path) } &&
+        (try? String(contentsOf: d3dMetal.appendingPathComponent("version.txt"), encoding: .utf8)) == "d3dmetal-3.0-template-1.0.11"
     }
     var installed: Bool { engineInstalled && librariesInstalled }
     var initialized: Bool {
@@ -80,21 +114,187 @@ enum WineRuntime {
         return "ready"
     }
 
-    static func environment(paths: WinePaths) -> [String: String] {
+    static func environment(paths: WinePaths, graphicsBackend: GraphicsBackend = .metal, showHUD: Bool = false) -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
-        for key in Array(environment.keys) where key.hasPrefix("WINE") || key.hasPrefix("CX_") || key.hasPrefix("DYLD_") || key.hasPrefix("MNM_PLAY_") {
+        for key in Array(environment.keys) where key.hasPrefix("WINE") || key.hasPrefix("CX_") || key.hasPrefix("DYLD_") || key.hasPrefix("MNM_PLAY_") || key.hasPrefix("MNM_GRAPHICS_") || key == "MTL_HUD_ENABLED" {
             environment.removeValue(forKey: key)
         }
-        environment["WINEPREFIX"] = paths.prefix.path
+        switch graphicsBackend {
+        case .metal: environment["WINEPREFIX"] = paths.prefix.path
+        case .dxvk: environment["WINEPREFIX"] = paths.dxvkPrefix.path
+        case .d3dMetal: environment["WINEPREFIX"] = paths.d3dMetalPrefix.path
+        }
         environment["WINEARCH"] = "win64"
         environment["WINEDEBUG"] = "-all"
-        environment["WINEDLLOVERRIDES"] = "mscoree,mshtml=d;dxgi,d3d11,d3d10core=b"
+        switch graphicsBackend {
+        case .metal:
+            environment["WINEDLLOVERRIDES"] = "mscoree,mshtml=d;dxgi,d3d11,d3d10core=b"
+        case .dxvk:
+            environment["WINEDLLOVERRIDES"] = "mscoree,mshtml=d;dxgi,d3d11,d3d10core=n"
+        case .d3dMetal:
+            environment["WINEDLLOVERRIDES"] = "mscoree,mshtml=d;dxgi,d3d11=n,b"
+        }
         environment["PATH"] = paths.engine.appendingPathComponent("bin").path + ":/usr/bin:/bin:/usr/sbin:/sbin"
-        environment["DYLD_FALLBACK_LIBRARY_PATH"] = [paths.libraries.path,
+        var fallbackLibraries = [paths.libraries.path,
             paths.engine.appendingPathComponent("lib").path,
             paths.engine.appendingPathComponent("lib/wine/x86_64-unix").path,
-            paths.engine.appendingPathComponent("lib/external").path, "/usr/lib"].joined(separator: ":")
+            paths.engine.appendingPathComponent("lib/external").path, "/usr/lib"]
+        if graphicsBackend == .d3dMetal {
+            let external = paths.d3dMetal.appendingPathComponent("external", isDirectory: true)
+            fallbackLibraries.insert(external.path, at: 0)
+            environment["WINEDLLPATH_PREPEND"] = paths.d3dMetal.appendingPathComponent("wine", isDirectory: true).path
+            environment["CX_ACTIVE_GRAPHICS_BACKEND"] = "d3dmetal"
+            environment["WINED3DMETAL"] = "1"
+            environment["CX_D3DMETALPATH"] = external.path
+            environment["CX_APPLEGPTK_LIBD3DSHARED_PATH"] = external.appendingPathComponent("libd3dshared.dylib").path
+            environment["CX_APPLEGPT_LIBD3DSHARED_PATH"] = external.appendingPathComponent("libd3dshared.dylib").path
+        }
+        environment["DYLD_FALLBACK_LIBRARY_PATH"] = fallbackLibraries.joined(separator: ":")
+        if graphicsBackend == .dxvk {
+            environment["DXVK_LOG_LEVEL"] = "info"
+            environment["DXVK_LOG_PATH"] = paths.graphicsLogs.path
+            environment["DXVK_STATE_CACHE_PATH"] = paths.graphicsCache.path
+            if showHUD { environment["DXVK_HUD"] = "version,devinfo,fps" }
+        } else if showHUD {
+            environment["MTL_HUD_ENABLED"] = "1"
+        }
         return environment
+    }
+
+    static func prepareGraphicsBackend(_ backend: GraphicsBackend, paths: WinePaths) throws {
+        guard backend != .metal else { return }
+        if backend == .d3dMetal {
+            try prepareD3DMetal(paths: paths)
+            return
+        }
+        let manager = FileManager.default
+        guard paths.dxvkInstalled else {
+            throw PatcherSetupError.message("DXVK is not installed. Select it again from Graphics Backend.")
+        }
+        let sourceSystem32 = paths.prefix.appendingPathComponent("drive_c/windows/system32", isDirectory: true)
+        guard manager.fileExists(atPath: sourceSystem32.path) else {
+            throw PatcherSetupError.message("The Windows environment is incomplete. Set up Wine again.")
+        }
+        let managed = ["dxgi.dll", "d3d11.dll", "d3d10core.dll"]
+        let markerValue = "\(WineRuntime.version)|dxvk-macos-1.10.3|macos-three-dll-restored"
+
+        func testPrefixIsReady() -> Bool {
+            let marker = paths.dxvkPrefix.appendingPathComponent(".mnm-dxvk-test-ready")
+            guard (try? String(contentsOf: marker, encoding: .utf8)) == markerValue else { return false }
+            let system32 = paths.dxvkPrefix.appendingPathComponent("drive_c/windows/system32", isDirectory: true)
+            return managed.allSatisfy {
+                manager.contentsEqual(atPath: system32.appendingPathComponent($0).path,
+                                      andPath: paths.dxvk.appendingPathComponent($0).path)
+            }
+        }
+        if testPrefixIsReady() { return }
+
+        let stage = paths.support.appendingPathComponent(".Prefix-DXVK-Test-\(UUID().uuidString)", isDirectory: true)
+        try manager.copyItem(at: paths.prefix, to: stage)
+        var stageShouldBeRemoved = true
+        defer { if stageShouldBeRemoved { try? manager.removeItem(at: stage) } }
+        let system32 = stage.appendingPathComponent("drive_c/windows/system32", isDirectory: true)
+
+        func replace(_ destination: URL, with source: URL) throws {
+            let temporary = destination.deletingLastPathComponent()
+                .appendingPathComponent(".mnm-\(destination.lastPathComponent)-\(UUID().uuidString)")
+            try manager.copyItem(at: source, to: temporary)
+            do {
+                if manager.fileExists(atPath: destination.path) {
+                    _ = try manager.replaceItemAt(destination, withItemAt: temporary)
+                } else {
+                    try manager.moveItem(at: temporary, to: destination)
+                }
+            } catch {
+                try? manager.removeItem(at: temporary)
+                throw error
+            }
+        }
+
+        for name in managed {
+            let destination = system32.appendingPathComponent(name)
+            guard manager.fileExists(atPath: destination.path) else {
+                throw PatcherSetupError.message("The Windows environment is missing \(name).")
+            }
+            try replace(destination, with: paths.dxvk.appendingPathComponent(name))
+        }
+        try markerValue.write(to: stage.appendingPathComponent(".mnm-dxvk-test-ready"), atomically: true, encoding: .utf8)
+        try manager.createDirectory(at: paths.graphicsLogs, withIntermediateDirectories: true)
+        try manager.createDirectory(at: paths.graphicsCache, withIntermediateDirectories: true)
+
+        if manager.fileExists(atPath: paths.dxvkPrefix.path) {
+            let old = paths.support.appendingPathComponent(".Prefix-DXVK-Test-Previous-\(UUID().uuidString)", isDirectory: true)
+            try manager.moveItem(at: paths.dxvkPrefix, to: old)
+            do {
+                try manager.moveItem(at: stage, to: paths.dxvkPrefix)
+                stageShouldBeRemoved = false
+                try? manager.removeItem(at: old)
+            } catch {
+                try? manager.moveItem(at: old, to: paths.dxvkPrefix)
+                throw error
+            }
+        } else {
+            try manager.moveItem(at: stage, to: paths.dxvkPrefix)
+            stageShouldBeRemoved = false
+        }
+    }
+
+    private static func prepareD3DMetal(paths: WinePaths) throws {
+        let manager = FileManager.default
+        guard paths.d3dMetalInstalled else {
+            throw PatcherSetupError.message("D3DMetal is not installed. Select it again from Graphics.")
+        }
+        let sourceSystem32 = paths.prefix.appendingPathComponent("drive_c/windows/system32", isDirectory: true)
+        guard manager.fileExists(atPath: sourceSystem32.path) else {
+            throw PatcherSetupError.message("The Windows environment is incomplete. Set up Wine again.")
+        }
+        let managed = ["dxgi.dll", "d3d11.dll"]
+        let markerValue = "\(WineRuntime.version)|d3dmetal-3.0-template-1.0.11"
+
+        func prefixIsReady() -> Bool {
+            let marker = paths.d3dMetalPrefix.appendingPathComponent(".mnm-d3dmetal-test-ready")
+            guard (try? String(contentsOf: marker, encoding: .utf8)) == markerValue else { return false }
+            let system32 = paths.d3dMetalPrefix.appendingPathComponent("drive_c/windows/system32", isDirectory: true)
+            return managed.allSatisfy {
+                manager.contentsEqual(
+                    atPath: system32.appendingPathComponent($0).path,
+                    andPath: paths.d3dMetal.appendingPathComponent("wine/x86_64-windows/\($0)").path
+                )
+            }
+        }
+        if prefixIsReady() { return }
+
+        let stage = paths.support.appendingPathComponent(".Prefix-D3DMetal-Test-\(UUID().uuidString)", isDirectory: true)
+        try manager.copyItem(at: paths.prefix, to: stage)
+        var stageShouldBeRemoved = true
+        defer { if stageShouldBeRemoved { try? manager.removeItem(at: stage) } }
+        let system32 = stage.appendingPathComponent("drive_c/windows/system32", isDirectory: true)
+        for name in managed {
+            let destination = system32.appendingPathComponent(name)
+            guard manager.fileExists(atPath: destination.path) else {
+                throw PatcherSetupError.message("The Windows environment is missing \(name).")
+            }
+            let temporary = system32.appendingPathComponent(".mnm-\(name)-\(UUID().uuidString)")
+            try manager.copyItem(at: paths.d3dMetal.appendingPathComponent("wine/x86_64-windows/\(name)"), to: temporary)
+            _ = try manager.replaceItemAt(destination, withItemAt: temporary)
+        }
+        try markerValue.write(to: stage.appendingPathComponent(".mnm-d3dmetal-test-ready"), atomically: true, encoding: .utf8)
+
+        if manager.fileExists(atPath: paths.d3dMetalPrefix.path) {
+            let old = paths.support.appendingPathComponent(".Prefix-D3DMetal-Test-Previous-\(UUID().uuidString)", isDirectory: true)
+            try manager.moveItem(at: paths.d3dMetalPrefix, to: old)
+            do {
+                try manager.moveItem(at: stage, to: paths.d3dMetalPrefix)
+                stageShouldBeRemoved = false
+                try? manager.removeItem(at: old)
+            } catch {
+                try? manager.moveItem(at: old, to: paths.d3dMetalPrefix)
+                throw error
+            }
+        } else {
+            try manager.moveItem(at: stage, to: paths.d3dMetalPrefix)
+            stageShouldBeRemoved = false
+        }
     }
 
     static func initialize(paths: WinePaths, progress: (String) -> Void) throws {
@@ -210,10 +410,13 @@ enum GameSession {
         guard paths.initialized, let wine = paths.wine else { throw PatcherSetupError.message("Use Set Up Wine first.") }
         guard let game = gameDirectory ?? paths.selectedGame else { throw PatcherSetupError.message("Install the game or choose its folder first.") }
         guard let credential = suppliedCredential ?? token(), isValid(credential) else { throw PatcherSetupError.message("Sign in again using Update / Log In.") }
+        let graphicsBackend = GraphicsBackend.requested
+        let showHUD = ProcessInfo.processInfo.environment["MNM_GRAPHICS_HUD"] == "1"
+        try WineRuntime.prepareGraphicsBackend(graphicsBackend, paths: paths)
         let process = Process()
         process.executableURL = wine
         process.currentDirectoryURL = game
-        process.environment = WineRuntime.environment(paths: paths)
+        process.environment = WineRuntime.environment(paths: paths, graphicsBackend: graphicsBackend, showHUD: showHUD)
         process.arguments = [game.appendingPathComponent("mnm.exe").path, "--token", credential, "-force-d3d11"]
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice

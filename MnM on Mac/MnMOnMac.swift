@@ -95,6 +95,12 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private static let accentColor = NSColor(calibratedRed: 0.94, green: 0.31, blue: 0.035, alpha: 1)
     private static let completedInitialSetupKey = "MnMCompletedInitialSetup"
     private static let hideWelcomeKey = "MnMHideWelcomeExplanation"
+    private static let graphicsBackendKey = "MnMGraphicsBackend"
+    private static let confirmedDXVKKey = "MnMConfirmedDXVKRisk"
+    private static let confirmedD3DMetalKey = "MnMConfirmedD3DMetalLicense"
+    private static let metalPerformanceHUDKey = "MnMMetalPerformanceHUD"
+    private static let dxvkPerformanceHUDKey = "MnMDXVKPerformanceHUD"
+    private static let d3dMetalPerformanceHUDKey = "MnMD3DMetalPerformanceHUD"
     private var window: NSWindow!
     private var updatesWebView: WKWebView!
     private let statusLabel = NSTextField(wrappingLabelWithString: "Checking your game…")
@@ -110,10 +116,13 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private var setupInfo: NSStackView!
     private var setupInfoTitle: NSTextField!
     private var setupInfoBody: NSTextField!
+    private var graphicsBackendRow: NSStackView!
+    private var graphicsBackendButton: NSPopUpButton!
     private var officialSectionLabel: NSTextField!
     private var sectionDivider: NSView!
     private var thirdPartyButton: NSButton!
     private var versionButton: NSButton!
+    private var hudButton: NSButton!
     private var availableReleaseURL: URL?
     private var state = ""
     private var busy = false
@@ -244,6 +253,47 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         statusGroup.alignment = .leading
         statusGroup.spacing = 5
 
+        let graphicsBackendLabel = NSTextField(labelWithString: "Graphics")
+        graphicsBackendLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        graphicsBackendLabel.setContentHuggingPriority(.required, for: .horizontal)
+        graphicsBackendLabel.widthAnchor.constraint(equalToConstant: 56).isActive = true
+        graphicsBackendButton = NSPopUpButton(frame: .zero, pullsDown: false)
+        graphicsBackendButton.addItem(withTitle: "DXMT (Recommended)")
+        graphicsBackendButton.addItem(withTitle: "D3DMetal")
+        graphicsBackendButton.addItem(withTitle: "DXVK (Experimental)")
+        switch selectedGraphicsBackend {
+        case .metal: graphicsBackendButton.selectItem(at: 0)
+        case .dxvk: graphicsBackendButton.selectItem(at: 2)
+        case .d3dMetal: graphicsBackendButton.selectItem(at: 1)
+        }
+        graphicsBackendButton.target = self
+        graphicsBackendButton.action = #selector(graphicsBackendChanged)
+        graphicsBackendButton.toolTip = "DXMT is recommended. Other graphics options download on first use and use separate Windows environments."
+        graphicsBackendButton.setAccessibilityLabel("Graphics backend")
+        graphicsBackendButton.setAccessibilityHelp("Choose the graphics translation used to launch the game.")
+        graphicsBackendButton.controlSize = .regular
+        graphicsBackendButton.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        graphicsBackendButton.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        hudButton = NSButton(image: NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Performance HUD settings")!,
+                             target: self, action: #selector(showPerformanceHUDMenu))
+        hudButton.isBordered = false
+        hudButton.imagePosition = .imageOnly
+        let hudEnabled = performanceHUDEnabled
+        hudButton.contentTintColor = hudEnabled ? .systemGreen : .secondaryLabelColor
+        hudButton.toolTip = "Performance HUD: \(hudEnabled ? "On" : "Off")"
+        hudButton.setAccessibilityLabel("Performance HUD settings")
+        hudButton.setAccessibilityValue(hudEnabled ? "On" : "Off")
+        hudButton.widthAnchor.constraint(equalToConstant: 24).isActive = true
+        hudButton.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        graphicsBackendRow = NSStackView(views: [graphicsBackendLabel, graphicsBackendButton, hudButton])
+        graphicsBackendRow.orientation = .horizontal
+        graphicsBackendRow.alignment = .centerY
+        graphicsBackendRow.distribution = .fill
+        graphicsBackendRow.spacing = 8
+        graphicsBackendRow.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        graphicsBackendRow.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        graphicsBackendRow.isHidden = true
+
         playButton = NSButton(title: "Play", target: self, action: #selector(play))
         playButton.cell = PrimaryActionCell(textCell: "Play")
         playButton.setButtonType(.momentaryPushIn)
@@ -349,25 +399,33 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         footerDivider.widthAnchor.constraint(equalToConstant: 300).isActive = true
         footerDivider.heightAnchor.constraint(equalToConstant: 1).isActive = true
 
-        let footerLinkSpacer = NSView()
-        footerLinkSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        footerLinkSpacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         versionButton.setContentHuggingPriority(.required, for: .horizontal)
         thirdPartyButton.setContentHuggingPriority(.required, for: .horizontal)
         legalButton.setContentHuggingPriority(.required, for: .horizontal)
         thirdPartyButton.alignment = .center
         legalButton.alignment = .right
-        let footerLinks = NSStackView(views: [versionButton, footerLinkSpacer, thirdPartyButton, legalButton])
-        footerLinks.orientation = .horizontal
-        footerLinks.alignment = .centerY
-        footerLinks.distribution = .fill
-        footerLinks.spacing = 12
+        let footerRightLinks = NSStackView(views: [thirdPartyButton, legalButton])
+        footerRightLinks.orientation = .horizontal
+        footerRightLinks.alignment = .centerY
+        footerRightLinks.spacing = 12
+        let footerLinks = NSView()
+        for view in [versionButton!, footerRightLinks] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            footerLinks.addSubview(view)
+        }
         footerLinks.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        footerLinks.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        NSLayoutConstraint.activate([
+            versionButton.leadingAnchor.constraint(equalTo: footerLinks.leadingAnchor),
+            versionButton.centerYAnchor.constraint(equalTo: footerLinks.centerYAnchor),
+            footerRightLinks.trailingAnchor.constraint(equalTo: footerLinks.trailingAnchor),
+            footerRightLinks.centerYAnchor.constraint(equalTo: footerLinks.centerYAnchor)
+        ])
 
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .vertical)
         spacer.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
-        let controls = NSStackView(views: [identity, launcherSectionLabel, statusGroup, playButton,
+        let controls = NSStackView(views: [identity, launcherSectionLabel, statusGroup, graphicsBackendRow, playButton,
                                            setupInfo,
                                            fileActions, sectionDivider, officialSectionLabel, accountActions,
                                            setupLogButton, footerDivider, spacer, footerLinks])
@@ -376,6 +434,8 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         controls.spacing = 7
         controls.setCustomSpacing(16, after: identity)
         controls.setCustomSpacing(8, after: launcherSectionLabel)
+        controls.setCustomSpacing(10, after: statusGroup)
+        controls.setCustomSpacing(9, after: graphicsBackendRow)
         controls.setCustomSpacing(10, after: fileActions)
         controls.setCustomSpacing(10, after: sectionDivider)
         controls.setCustomSpacing(3, after: officialSectionLabel)
@@ -722,7 +782,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             return override
         }
 #endif
-        return Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.1"
+        return Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.2"
     }
 
     private func normalizedVersion(_ value: String) -> [Int]? {
@@ -801,6 +861,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         guard !busy, window != nil else { return }
         setInitialSetupMode(false)
         if let failure = storageFailure {
+            setReadyLayout(false)
             statusLabel.stringValue = "Data folder needs attention"
             statusLabel.textColor = .systemOrange
             detailLabel.stringValue = failure
@@ -818,6 +879,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             else { lastPatcherFailure = nil }
         }
         if gameProcess?.isRunning == true || GameRunState.isRunning(.current) {
+            setReadyLayout(false)
             statusLabel.stringValue = "Game is running"
             statusLabel.textColor = .systemGreen
             detailLabel.stringValue = "Enjoy Monsters & Memories."
@@ -826,9 +888,11 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             updateButton.isEnabled = false
             reauthenticateButton.isEnabled = false
             folderButton.isEnabled = false
+            graphicsBackendButton.isEnabled = false
             return
         }
         if let patcher = patcherProcess, patcher.isRunning {
+            setReadyLayout(false)
             let gameFound = WinePaths.current.selectedGame != nil
             let initialSetup = !UserDefaults.standard.bool(forKey: Self.completedInitialSetupKey)
             if closePatcherAfterInitialSetup && WineRuntime.readiness == "ready" && GameSession.hasRecordedInstallation {
@@ -871,10 +935,12 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             && ["needs_login", "needs_game"].contains(state)
         let focusedSetup = setupRequired || initialSetup
         setInitialSetupMode(focusedSetup)
+        setReadyLayout(state == "ready")
         playButton.title = LauncherStep(readiness: state)?.title ?? "Continue"
         playButton.isEnabled = true
         updateButton.isEnabled = true
         reauthenticateButton.isEnabled = true
+        graphicsBackendButton.isEnabled = true
         updateButton.isHidden = state != "ready"
         updateButton.title = "Update / Log In"
         statusLabel.textColor = .labelColor
@@ -882,7 +948,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         case "ready":
             statusLabel.stringValue = "Ready to play"
             statusLabel.textColor = .systemGreen
-            detailLabel.stringValue = "Click Play to start the game."
+            detailLabel.stringValue = ""
         case "needs_login":
             let gameFound = WinePaths.current.selectedGame != nil
             statusLabel.stringValue = gameFound ? "Game installed — sign in to play" : "Sign in to play"
@@ -932,6 +998,11 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         default: break
         }
         guard state == "ready", gameProcess?.isRunning != true, patcherProcess?.isRunning != true else { return }
+        if (selectedGraphicsBackend == .dxvk && !WinePaths.current.dxvkInstalled) ||
+           (selectedGraphicsBackend == .d3dMetal && !WinePaths.current.d3dMetalInstalled) {
+            graphicsBackendChanged()
+            return
+        }
         guard NSRunningApplication.runningApplications(withBundleIdentifier: NativePatcherInstaller.bundleID).allSatisfy({ $0.isTerminated }) else {
             showError("Quit the official patcher before playing here.")
             return
@@ -944,6 +1015,10 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             let process = Process()
             process.executableURL = bridge
             process.arguments = ["--from-app"]
+            var environment = ProcessInfo.processInfo.environment
+            environment["MNM_GRAPHICS_BACKEND"] = selectedGraphicsBackend.rawValue
+            environment["MNM_GRAPHICS_HUD"] = performanceHUDEnabled ? "1" : "0"
+            process.environment = environment
             process.standardInput = FileHandle.nullDevice
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
@@ -1029,13 +1104,155 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     private func setInitialSetupMode(_ active: Bool) {
-        launcherSectionLabel.stringValue = active ? "Initial Setup" : "MnM on Mac Launcher"
-        launcherSectionLabel.textColor = active ? Self.accentColor : .secondaryLabelColor
+        launcherSectionLabel.stringValue = "Initial Setup"
+        launcherSectionLabel.textColor = Self.accentColor
+        launcherSectionLabel.isHidden = !active
         setupInfo.isHidden = !active
         fileActions.isHidden = active
+        if active { setReadyLayout(false) }
         sectionDivider.isHidden = active
         officialSectionLabel.isHidden = active
         accountActions.isHidden = active
+    }
+
+    private func setReadyLayout(_ active: Bool) {
+        if detailLabel.isHidden != active {
+            detailLabel.isHidden = active
+        }
+        if graphicsBackendRow.isHidden == active {
+            graphicsBackendRow.isHidden = !active
+        }
+    }
+
+    private var selectedGraphicsBackend: GraphicsBackend {
+        guard let value = UserDefaults.standard.string(forKey: Self.graphicsBackendKey),
+              let backend = GraphicsBackend(rawValue: value) else { return .metal }
+        return backend
+    }
+
+    private var performanceHUDKey: String {
+        switch selectedGraphicsBackend {
+        case .metal: return Self.metalPerformanceHUDKey
+        case .dxvk: return Self.dxvkPerformanceHUDKey
+        case .d3dMetal: return Self.d3dMetalPerformanceHUDKey
+        }
+    }
+
+    private var performanceHUDEnabled: Bool {
+        UserDefaults.standard.bool(forKey: performanceHUDKey)
+    }
+
+    private func updatePerformanceHUDButtonAppearance() {
+        let enabled = performanceHUDEnabled
+        hudButton.toolTip = "Performance HUD: \(enabled ? "On" : "Off")"
+        hudButton.contentTintColor = enabled ? .systemGreen : .secondaryLabelColor
+        hudButton.setAccessibilityValue(enabled ? "On" : "Off")
+    }
+
+    @objc private func showPerformanceHUDMenu(_ sender: NSButton) {
+        let menu = NSMenu()
+        let renderer: String
+        switch selectedGraphicsBackend {
+        case .metal: renderer = "DXMT"
+        case .dxvk: renderer = "DXVK"
+        case .d3dMetal: renderer = "D3DMetal"
+        }
+        let item = NSMenuItem(title: "\(renderer) Performance HUD", action: #selector(togglePerformanceHUD), keyEquivalent: "")
+        item.target = self
+        item.state = performanceHUDEnabled ? .on : .off
+        menu.addItem(item)
+        menu.addItem(.separator())
+        let note = NSMenuItem(title: "Applies on next game launch", action: nil, keyEquivalent: "")
+        note.isEnabled = false
+        menu.addItem(note)
+        menu.popUp(positioning: item, at: NSPoint(x: sender.bounds.midX, y: sender.bounds.maxY + 4), in: sender)
+    }
+
+    @objc private func togglePerformanceHUD() {
+        let defaults = UserDefaults.standard
+        defaults.set(!performanceHUDEnabled, forKey: performanceHUDKey)
+        updatePerformanceHUDButtonAppearance()
+    }
+
+    @objc private func graphicsBackendChanged() {
+        let backend: GraphicsBackend
+        switch graphicsBackendButton.indexOfSelectedItem {
+        case 1: backend = .d3dMetal
+        case 2: backend = .dxvk
+        default: backend = .metal
+        }
+        guard backend != .metal else {
+            UserDefaults.standard.set(GraphicsBackend.metal.rawValue, forKey: Self.graphicsBackendKey)
+            updatePerformanceHUDButtonAppearance()
+            return
+        }
+
+        let confirmationKey = backend == .dxvk ? Self.confirmedDXVKKey : Self.confirmedD3DMetalKey
+        if !UserDefaults.standard.bool(forKey: confirmationKey) {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            if backend == .dxvk {
+                alert.messageText = "Use Experimental DXVK?"
+                alert.informativeText = "DXVK is an optional third-party graphics backend being tested with Monsters & Memories. It uses a separate copy of the Windows environment, so the normal Metal setup stays untouched. Its maintainer warns that replacing Direct3D libraries in an online game may be unsupported or treated as cheating. Metal remains the recommended option."
+                alert.addButton(withTitle: "Install & Use DXVK")
+            } else {
+                alert.messageText = "Test D3DMetal?"
+                alert.informativeText = "D3DMetal 3.0 is Apple’s Game Porting Toolkit graphics layer. It is licensed for non-commercial development, testing, and evaluation on Apple hardware. MnM on Mac will download it from the Sikarugir 1.0.11 support package and use a separate Windows environment. Review Apple’s license in About before continuing."
+                alert.addButton(withTitle: "I Agree & Install")
+            }
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else {
+                graphicsBackendButton.selectItem(at: 0)
+                UserDefaults.standard.set(GraphicsBackend.metal.rawValue, forKey: Self.graphicsBackendKey)
+                updatePerformanceHUDButtonAppearance()
+                return
+            }
+            UserDefaults.standard.set(true, forKey: confirmationKey)
+        }
+
+        let alreadyInstalled = backend == .dxvk ? WinePaths.current.dxvkInstalled : WinePaths.current.d3dMetalInstalled
+        if alreadyInstalled {
+            UserDefaults.standard.set(backend.rawValue, forKey: Self.graphicsBackendKey)
+            updatePerformanceHUDButtonAppearance()
+            return
+        }
+
+        busy = true
+        playButton.isEnabled = false
+        updateButton.isEnabled = false
+        reauthenticateButton.isEnabled = false
+        folderButton.isEnabled = false
+        graphicsBackendButton.isEnabled = false
+        let displayName = backend == .dxvk ? "DXVK" : "D3DMetal"
+        statusLabel.stringValue = "Installing \(displayName)…"
+        statusLabel.textColor = .labelColor
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let report: (String) -> Void = { message in
+                    DispatchQueue.main.async { self.statusLabel.stringValue = message }
+                }
+                if backend == .dxvk {
+                    try DXVKInstaller(paths: .current).install(progress: report)
+                } else {
+                    try D3DMetalInstaller(paths: .current).install(progress: report)
+                }
+                DispatchQueue.main.async {
+                    UserDefaults.standard.set(backend.rawValue, forKey: Self.graphicsBackendKey)
+                    self.updatePerformanceHUDButtonAppearance()
+                    self.busy = false
+                    self.refresh()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    UserDefaults.standard.set(GraphicsBackend.metal.rawValue, forKey: Self.graphicsBackendKey)
+                    self.graphicsBackendButton.selectItem(at: 0)
+                    self.updatePerformanceHUDButtonAppearance()
+                    self.lastPatcherFailure = error.localizedDescription
+                    self.busy = false
+                    self.refresh()
+                }
+            }
+        }
     }
 
     private func updateSetupInfo(for setupState: String) {
@@ -1360,6 +1577,12 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         credit("DXMT 0.80", detail: "Feifan He (3Shain) and DXMT contributors — Direct3D 10/11 translation for Metal.",
                sourceTitle: "Source", source: "https://github.com/3Shain/dxmt/tree/v0.80",
                licenseTitle: "MIT License", license: "https://github.com/3Shain/dxmt/blob/v0.80/LICENSE")
+        credit("DXVK 1.10.3 for macOS", detail: "Gcenx, Philip Rebohle, and DXVK contributors — the experimental Vulkan-based graphics option.",
+               sourceTitle: "macOS Release", source: "https://github.com/Gcenx/DXVK-macOS/releases/tag/v1.10.3",
+               licenseTitle: "zlib License", license: "https://github.com/doitsujin/dxvk/blob/v1.10.3/LICENSE")
+        credit("D3DMetal 3.0", detail: "Apple — the Game Porting Toolkit graphics layer, supplied through the Sikarugir 1.0.11 support package for testing.",
+               sourceTitle: "Sikarugir Package", source: "https://github.com/Sikarugir-App/Wrapper/releases/tag/v1.0",
+               licenseTitle: "Apple GPTK", license: "https://developer.apple.com/games/game-porting-toolkit/")
         credit("wine-msync", detail: "Marzent and contributors — Mach semaphore synchronization for Wine on macOS.",
                sourceTitle: "Source", source: "https://github.com/marzent/wine-msync",
                licenseTitle: "LGPL 2.1 License", license: "https://github.com/marzent/wine-msync/blob/main/LICENSE")
