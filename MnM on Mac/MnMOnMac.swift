@@ -8,6 +8,16 @@
 import AppKit
 import WebKit
 
+private struct GitHubRelease: Decodable {
+    let tagName: String
+    let htmlURL: URL
+
+    enum CodingKeys: String, CodingKey {
+        case tagName = "tag_name"
+        case htmlURL = "html_url"
+    }
+}
+
 private let hiddenSetupDotAttribute = NSAttributedString.Key("MnMHiddenSetupDot")
 
 final class PrimaryActionCell: NSButtonCell {
@@ -80,6 +90,8 @@ enum MnMOnMac {
 
 final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate {
     private static let updatesURL = URL(string: "https://monstersandmemories.com/updates")!
+    private static let masterUserAgreementURL = URL(string: "https://account.monstersandmemories.com/policy/mau")!
+    private static let latestReleaseAPIURL = URL(string: "https://api.github.com/repos/seathasky/MnM-on-Mac/releases/latest")!
     private static let accentColor = NSColor(calibratedRed: 0.94, green: 0.31, blue: 0.035, alpha: 1)
     private static let completedInitialSetupKey = "MnMCompletedInitialSetup"
     private static let hideWelcomeKey = "MnMHideWelcomeExplanation"
@@ -101,6 +113,8 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private var officialSectionLabel: NSTextField!
     private var sectionDivider: NSView!
     private var thirdPartyButton: NSButton!
+    private var versionButton: NSButton!
+    private var availableReleaseURL: URL?
     private var state = ""
     private var busy = false
     private var patcherProcess: Process?
@@ -137,6 +151,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         if !UserDefaults.standard.bool(forKey: Self.hideWelcomeKey) {
             DispatchQueue.main.async { [weak self] in self?.showWelcomeExplanation() }
         }
+        checkForAppUpdate()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.refresh() }
     }
 
@@ -303,16 +318,51 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         setupLogButton.font = .systemFont(ofSize: 12)
         setupLogButton.isHidden = true
 
-        thirdPartyButton = NSButton(title: "About & Third-Party Software", target: self, action: #selector(showThirdPartySoftware))
+        thirdPartyButton = NSButton(title: "About", target: self, action: #selector(showThirdPartySoftware))
         thirdPartyButton.isBordered = false
         thirdPartyButton.attributedTitle = NSAttributedString(
-            string: "About & Third-Party Software",
+            string: "About",
             attributes: [.font: NSFont.systemFont(ofSize: 11),
                          .foregroundColor: Self.accentColor,
                          .underlineStyle: NSUnderlineStyle.single.rawValue])
         thirdPartyButton.alignment = .center
-        thirdPartyButton.widthAnchor.constraint(equalToConstant: 300).isActive = true
         thirdPartyButton.setAccessibilityLabel("About MnM on Mac and third-party software")
+
+        let legalButton = NSButton(title: "Legal", target: self, action: #selector(showLegalExplanation))
+        legalButton.isBordered = false
+        legalButton.attributedTitle = NSAttributedString(
+            string: "Legal",
+            attributes: [.font: NSFont.systemFont(ofSize: 11),
+                         .foregroundColor: Self.accentColor,
+                         .underlineStyle: NSUnderlineStyle.single.rawValue])
+        legalButton.setAccessibilityLabel("Legal and compatibility information")
+
+        versionButton = NSButton(title: "", target: nil, action: nil)
+        versionButton.isBordered = false
+        versionButton.alignment = .left
+        versionButton.setAccessibilityLabel("MnM on Mac version")
+        showInstalledVersion()
+
+        let footerDivider = NSView()
+        footerDivider.wantsLayer = true
+        footerDivider.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.09).cgColor
+        footerDivider.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        footerDivider.heightAnchor.constraint(equalToConstant: 1).isActive = true
+
+        let footerLinkSpacer = NSView()
+        footerLinkSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        footerLinkSpacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        versionButton.setContentHuggingPriority(.required, for: .horizontal)
+        thirdPartyButton.setContentHuggingPriority(.required, for: .horizontal)
+        legalButton.setContentHuggingPriority(.required, for: .horizontal)
+        thirdPartyButton.alignment = .center
+        legalButton.alignment = .right
+        let footerLinks = NSStackView(views: [versionButton, footerLinkSpacer, thirdPartyButton, legalButton])
+        footerLinks.orientation = .horizontal
+        footerLinks.alignment = .centerY
+        footerLinks.distribution = .fill
+        footerLinks.spacing = 12
+        footerLinks.widthAnchor.constraint(equalToConstant: 300).isActive = true
 
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .vertical)
@@ -320,7 +370,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         let controls = NSStackView(views: [identity, launcherSectionLabel, statusGroup, playButton,
                                            setupInfo,
                                            fileActions, sectionDivider, officialSectionLabel, accountActions,
-                                           setupLogButton, spacer, thirdPartyButton])
+                                           setupLogButton, footerDivider, spacer, footerLinks])
         controls.orientation = .vertical
         controls.alignment = .leading
         controls.spacing = 7
@@ -329,6 +379,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         controls.setCustomSpacing(10, after: fileActions)
         controls.setCustomSpacing(10, after: sectionDivider)
         controls.setCustomSpacing(3, after: officialSectionLabel)
+        controls.setCustomSpacing(10, after: accountActions)
         controls.translatesAutoresizingMaskIntoConstraints = false
 
         let controlsPanel = NSView()
@@ -662,6 +713,78 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     @objc private func openUpdatesWebsite() {
         NSWorkspace.shared.open(Self.updatesURL)
+    }
+
+    private func installedAppVersion() -> String {
+#if DEBUG
+        if let override = ProcessInfo.processInfo.environment["MNM_TEST_APP_VERSION"],
+           normalizedVersion(override) != nil {
+            return override
+        }
+#endif
+        return Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.1"
+    }
+
+    private func normalizedVersion(_ value: String) -> [Int]? {
+        var text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.lowercased().hasPrefix("v") { text.removeFirst() }
+        text = String(text.split(separator: "-", maxSplits: 1).first ?? "")
+        let values = text.split(separator: ".").map { Int($0) }
+        guard !values.isEmpty, values.allSatisfy({ $0 != nil }) else { return nil }
+        return values.compactMap { $0 }
+    }
+
+    private func isNewerVersion(_ candidate: String, than current: String) -> Bool {
+        guard var candidateParts = normalizedVersion(candidate), var currentParts = normalizedVersion(current) else { return false }
+        let count = max(candidateParts.count, currentParts.count)
+        candidateParts += Array(repeating: 0, count: count - candidateParts.count)
+        currentParts += Array(repeating: 0, count: count - currentParts.count)
+        return currentParts.lexicographicallyPrecedes(candidateParts)
+    }
+
+    private func showInstalledVersion() {
+        availableReleaseURL = nil
+        versionButton.target = nil
+        versionButton.action = nil
+        versionButton.attributedTitle = NSAttributedString(
+            string: "Version \(installedAppVersion())",
+            attributes: [.font: NSFont.systemFont(ofSize: 10),
+                         .foregroundColor: NSColor.secondaryLabelColor])
+    }
+
+    private func checkForAppUpdate() {
+        let currentVersion = installedAppVersion()
+        var request = URLRequest(url: Self.latestReleaseAPIURL)
+        request.timeoutInterval = 10
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("MnM-on-Mac/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
+            guard let response = response as? HTTPURLResponse,
+                  response.statusCode == 200,
+                  let data else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      let release = try? JSONDecoder().decode(GitHubRelease.self, from: data),
+                      release.htmlURL.scheme == "https",
+                      release.htmlURL.host == "github.com",
+                      self.isNewerVersion(release.tagName, than: currentVersion) else { return }
+                let version = release.tagName.lowercased().hasPrefix("v") ? String(release.tagName.dropFirst()) : release.tagName
+                self.availableReleaseURL = release.htmlURL
+                self.versionButton.target = self
+                self.versionButton.action = #selector(self.openAvailableRelease)
+                self.versionButton.attributedTitle = NSAttributedString(
+                    string: "Update Available \(version)",
+                    attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+                                 .foregroundColor: NSColor.systemGreen,
+                                 .underlineStyle: NSUnderlineStyle.single.rawValue])
+                self.versionButton.setAccessibilityLabel("MnM on Mac update \(version) available")
+            }
+        }.resume()
+    }
+
+    @objc private func openAvailableRelease() {
+        if let availableReleaseURL { NSWorkspace.shared.open(availableReleaseURL) }
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
@@ -1169,6 +1292,20 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         if thirdPartyWindow == nil { thirdPartyWindow = makeThirdPartyWindow() }
         thirdPartyWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func showLegalExplanation() {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Legal & Compatibility"
+        alert.informativeText = "MnM on Mac is a native Swift app that makes the existing Mac and Wine setup much easier while staying within the Master User Agreement. It creates a self-contained Wine environment, but still relies entirely on the official Monsters & Memories launcher for logging in, installing, updating, and repairing the game. All account and download communication stays between the official launcher and NWC’s servers.\n\nThe only thing MnM on Mac changes is the local Play handoff, which can loop or fail on macOS. We redirect that handoff into the correct Wine environment so the game launches properly. After setup, players can use MnM on Mac’s Play button for convenience and open the official launcher whenever they need to log in, update, or repair. We don’t recreate or reverse-engineer any NWC services.\n\nMonsters & Memories, its name, logos, artwork, official launcher, game assets, and all related materials belong solely to Niche Worlds Cult and its licensors. MnM on Mac claims no ownership of those materials and is an independent community compatibility tool that is not affiliated with or endorsed by Niche Worlds Cult."
+        alert.addButton(withTitle: "Done")
+        alert.addButton(withTitle: "View Master User Agreement")
+        alert.beginSheetModal(for: window) { response in
+            if response == .alertSecondButtonReturn {
+                NSWorkspace.shared.open(Self.masterUserAgreementURL)
+            }
+        }
     }
 
     private func makeThirdPartyWindow() -> NSWindow {
