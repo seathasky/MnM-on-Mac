@@ -62,8 +62,13 @@ final class GhostActionCell: NSButtonCell {
         super.init(coder: coder)
     }
 
+    override var isHighlighted: Bool {
+        get { false }
+        set { }
+    }
+
     override func drawBezel(withFrame frame: NSRect, in controlView: NSView) {
-        (isEnabled ? tintColor.withAlphaComponent(0.3) : NSColor.white.withAlphaComponent(0.12)).setStroke()
+        NSColor.white.withAlphaComponent(0.12).setStroke()
         NSBezierPath(roundedRect: frame.insetBy(dx: 0.5, dy: 0.5), xRadius: 7, yRadius: 7).stroke()
     }
 
@@ -75,7 +80,7 @@ final class GhostActionCell: NSButtonCell {
         let styled = NSMutableAttributedString(attributedString: title)
         styled.addAttributes([
             .font: NSFont.systemFont(ofSize: 13, weight: .medium),
-            .foregroundColor: isEnabled ? tintColor.withAlphaComponent(0.6) : NSColor.secondaryLabelColor
+            .foregroundColor: NSColor.secondaryLabelColor
         ], range: NSRange(location: 0, length: styled.length))
         return super.drawTitle(styled, withFrame: frame, in: controlView)
     }
@@ -314,8 +319,8 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         let icon = NSImageView()
         icon.image = bundledIcon ?? NSApp.applicationIconImage
         icon.imageScaling = .scaleProportionallyUpOrDown
-        icon.widthAnchor.constraint(equalToConstant: 56).isActive = true
-        icon.heightAnchor.constraint(equalToConstant: 56).isActive = true
+        icon.widthAnchor.constraint(equalToConstant: 52).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 52).isActive = true
 
         let title = NSTextField(labelWithString: "MnM on Mac (Beta)")
         title.font = .systemFont(ofSize: 22, weight: .semibold)
@@ -338,7 +343,9 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         detailLabel.alignment = .left
         detailLabel.preferredMaxLayoutWidth = 300
         detailLabel.widthAnchor.constraint(equalToConstant: 300).isActive = true
-        detailLabel.heightAnchor.constraint(greaterThanOrEqualToConstant: 24).isActive = true
+        detailLabel.maximumNumberOfLines = 2
+        detailLabel.lineBreakMode = .byWordWrapping
+        detailLabel.heightAnchor.constraint(equalToConstant: 34).isActive = true
         let statusGroup = NSStackView(views: [statusLabel, detailLabel])
         statusGroup.orientation = .vertical
         statusGroup.alignment = .leading
@@ -401,14 +408,18 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         updateButton.isBordered = true
         updateButton.bezelStyle = .regularSquare
         updateButton.controlSize = .large
+        updateButton.target = self
+        updateButton.action = #selector(update)
         updateButton.widthAnchor.constraint(equalToConstant: 300).isActive = true
         updateButton.heightAnchor.constraint(equalToConstant: 34).isActive = true
 
         reauthenticateButton = NSButton(title: "Re-authenticate…", target: self, action: #selector(reauthenticate))
-        reauthenticateButton.cell = GhostActionCell(textCell: "Re-authenticate…", tintColor: .systemRed)
+        reauthenticateButton.cell = GhostActionCell(textCell: "Re-authenticate…")
         reauthenticateButton.isBordered = true
         reauthenticateButton.bezelStyle = .regularSquare
         reauthenticateButton.controlSize = .large
+        reauthenticateButton.target = self
+        reauthenticateButton.action = #selector(reauthenticate)
         reauthenticateButton.widthAnchor.constraint(equalToConstant: 300).isActive = true
         reauthenticateButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
         accountActions = NSStackView(views: [updateButton, reauthenticateButton])
@@ -417,9 +428,12 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         accountActions.spacing = 6
         accountActions.widthAnchor.constraint(equalToConstant: 300).isActive = true
 
-        launcherSectionLabel = NSTextField(labelWithString: "MnM on Mac Launcher")
-        launcherSectionLabel.font = .systemFont(ofSize: 11, weight: .semibold)
-        launcherSectionLabel.textColor = .secondaryLabelColor
+        launcherSectionLabel = NSTextField(labelWithString: "Initial Setup")
+        launcherSectionLabel.font = .systemFont(ofSize: 10, weight: .semibold)
+        launcherSectionLabel.textColor = Self.accentColor
+        launcherSectionLabel.heightAnchor.constraint(equalToConstant: 14).isActive = true
+        launcherSectionLabel.isHidden = true
+
         setupInfoTitle = NSTextField(labelWithString: "Why Wine is needed")
         setupInfoTitle.font = .systemFont(ofSize: 12, weight: .semibold)
         setupInfoBody = NSTextField(wrappingLabelWithString: "Monsters & Memories is built for Windows. Wine lets it run on your Mac inside a private environment, with no separate CrossOver installation required.")
@@ -431,7 +445,6 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         setupInfo.orientation = .vertical
         setupInfo.alignment = .leading
         setupInfo.spacing = 6
-        setupInfo.edgeInsets = NSEdgeInsets(top: 22, left: 0, bottom: 0, right: 0)
         setupInfo.isHidden = true
         let labelColor = NSColor.white.withAlphaComponent(0.4)
         let labelFont = NSFont.systemFont(ofSize: 10, weight: .bold)
@@ -453,10 +466,10 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         sectionDivider.heightAnchor.constraint(equalToConstant: 1).isActive = true
 
         folderButton = NSButton(title: "Choose Game Folder…", target: self, action: #selector(chooseFolder))
-        folderButton.bezelStyle = .inline
+        folderButton.bezelStyle = .rounded
         folderButton.font = .systemFont(ofSize: 11)
         let installDirectoryButton = NSButton(title: "Game Files", target: self, action: #selector(openInstallDirectory))
-        installDirectoryButton.bezelStyle = .inline
+        installDirectoryButton.bezelStyle = .rounded
         installDirectoryButton.font = .systemFont(ofSize: 11)
         fileActions = NSStackView(views: [installDirectoryButton, folderButton])
         fileActions.orientation = .horizontal
@@ -524,26 +537,44 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             footerRightLinks.centerYAnchor.constraint(equalTo: footerLinks.centerYAnchor)
         ])
 
-        let heroContent = NSStackView(views: [identity, launcherSectionLabel, statusGroup, graphicsBackendRow,
-                                              playButton, setupInfo, fileActions])
-        heroContent.orientation = .vertical
-        heroContent.alignment = .leading
-        heroContent.spacing = 7
-        heroContent.setCustomSpacing(16, after: identity)
-        heroContent.setCustomSpacing(8, after: launcherSectionLabel)
-        heroContent.setCustomSpacing(10, after: statusGroup)
-        heroContent.setCustomSpacing(9, after: graphicsBackendRow)
-        heroContent.setCustomSpacing(10, after: fileActions)
-
         let heroCard = HeroCardView()
         heroCard.translatesAutoresizingMaskIntoConstraints = false
-        heroContent.translatesAutoresizingMaskIntoConstraints = false
-        heroCard.addSubview(heroContent)
+        // The setup state needs enough room for its three-line explanation.
+        // Keep the primary action at the same fixed Y position in every state
+        // and add the room below it so labels are never compressed or clipped.
+        heroCard.heightAnchor.constraint(equalToConstant: 286).isActive = true
+        let heroViews: [NSView] = [identity, launcherSectionLabel, statusGroup, playButton, setupInfo, fileActions, graphicsBackendRow]
+        for view in heroViews {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            heroCard.addSubview(view)
+        }
         NSLayoutConstraint.activate([
-            heroContent.leadingAnchor.constraint(equalTo: heroCard.leadingAnchor, constant: 16),
-            heroContent.trailingAnchor.constraint(equalTo: heroCard.trailingAnchor, constant: -16),
-            heroContent.topAnchor.constraint(equalTo: heroCard.topAnchor, constant: 16),
-            heroContent.bottomAnchor.constraint(equalTo: heroCard.bottomAnchor, constant: -16)
+            identity.leadingAnchor.constraint(equalTo: heroCard.leadingAnchor, constant: 16),
+            identity.trailingAnchor.constraint(lessThanOrEqualTo: heroCard.trailingAnchor, constant: -16),
+            identity.topAnchor.constraint(equalTo: heroCard.topAnchor, constant: 14),
+
+            // Keep Play, Set Up Wine, and Show Official Launcher in one fixed slot.
+            playButton.leadingAnchor.constraint(equalTo: heroCard.leadingAnchor, constant: 16),
+            playButton.topAnchor.constraint(equalTo: identity.bottomAnchor, constant: 10),
+
+            launcherSectionLabel.leadingAnchor.constraint(equalTo: heroCard.leadingAnchor, constant: 16),
+            launcherSectionLabel.trailingAnchor.constraint(lessThanOrEqualTo: heroCard.trailingAnchor, constant: -16),
+            launcherSectionLabel.topAnchor.constraint(equalTo: playButton.bottomAnchor, constant: 6),
+
+            statusGroup.leadingAnchor.constraint(equalTo: heroCard.leadingAnchor, constant: 16),
+            statusGroup.trailingAnchor.constraint(equalTo: heroCard.trailingAnchor, constant: -16),
+            statusGroup.topAnchor.constraint(equalTo: launcherSectionLabel.bottomAnchor, constant: 3),
+
+            setupInfo.leadingAnchor.constraint(equalTo: heroCard.leadingAnchor, constant: 16),
+            setupInfo.trailingAnchor.constraint(equalTo: heroCard.trailingAnchor, constant: -16),
+            setupInfo.topAnchor.constraint(equalTo: statusGroup.bottomAnchor, constant: 6),
+            setupInfo.bottomAnchor.constraint(lessThanOrEqualTo: heroCard.bottomAnchor, constant: -10),
+
+            fileActions.leadingAnchor.constraint(equalTo: heroCard.leadingAnchor, constant: 16),
+            fileActions.topAnchor.constraint(equalTo: statusGroup.bottomAnchor, constant: 6),
+
+            graphicsBackendRow.leadingAnchor.constraint(equalTo: heroCard.leadingAnchor, constant: 16),
+            graphicsBackendRow.topAnchor.constraint(equalTo: fileActions.bottomAnchor, constant: 6)
         ])
 
         let maintenanceContent = NSStackView(views: [officialSectionLabel, accountActions, setupLogButton])
@@ -567,10 +598,13 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .vertical)
         spacer.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
-        let controls = NSStackView(views: [heroCard, maintenanceCard, spacer, footerDivider, footerLinks])
+        // Let the flexible space separate the main card from maintenance so the
+        // official-launcher card stays anchored beside the footer divider.
+        let controls = NSStackView(views: [heroCard, spacer, maintenanceCard, footerDivider, footerLinks])
         controls.orientation = .vertical
         controls.alignment = .leading
         controls.spacing = 16
+        controls.setCustomSpacing(8, after: maintenanceCard)
         controls.setCustomSpacing(8, after: footerDivider)
         controls.translatesAutoresizingMaskIntoConstraints = false
 
@@ -652,7 +686,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             return override
         }
 #endif
-        return Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.3"
+        return Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.4"
     }
 
     private func normalizedVersion(_ value: String) -> [Int]? {
@@ -739,7 +773,8 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             else { lastPatcherFailure = nil }
         }
         if gameProcess?.isRunning == true || GameRunState.isRunning(.current) {
-            setReadyLayout(false)
+            setReadyLayout(true)
+            graphicsBackendRow.alphaValue = 0.45
             statusLabel.stringValue = "Game is running"
             statusLabel.textColor = .systemGreen
             detailLabel.stringValue = "Enjoy Monsters & Memories."
@@ -749,6 +784,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             reauthenticateButton.isEnabled = false
             folderButton.isEnabled = false
             graphicsBackendButton.isEnabled = false
+            hudButton.isEnabled = false
             return
         }
         if let patcher = patcherProcess, patcher.isRunning {
@@ -764,7 +800,6 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
                     statusLabel.textColor = .systemGreen
                     detailLabel.stringValue = "Closing the official launcher and preparing MnM on Mac."
                     playButton.isEnabled = false
-                    updateButton.isHidden = true
                     patcher.terminate()
                     return
                 }
@@ -780,7 +815,6 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
                 : "Use it only to finish installing or updating. Close it when you are done."
             playButton.title = "Show Official Launcher"
             playButton.isEnabled = true
-            updateButton.isHidden = true
             if let failure = lastPatcherFailure {
                 statusLabel.stringValue = "Game needs attention"
                 statusLabel.textColor = .systemOrange
@@ -795,16 +829,14 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             && ["needs_login", "needs_game"].contains(state)
         let focusedSetup = setupRequired || initialSetup
         setInitialSetupMode(focusedSetup)
-        if state == "needs_runtime_update" {
-            launcherSectionLabel.stringValue = "Runtime Update"
-        }
         setReadyLayout(state == "ready")
         playButton.title = LauncherStep(readiness: state)?.title ?? "Continue"
         playButton.isEnabled = true
         updateButton.isEnabled = true
         reauthenticateButton.isEnabled = true
         graphicsBackendButton.isEnabled = true
-        updateButton.isHidden = state != "ready"
+        hudButton.isEnabled = true
+        updateButton.isHidden = false
         updateButton.title = "Install / Update / Login"
         statusLabel.textColor = .labelColor
         switch state {
@@ -919,7 +951,6 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         busy = true
         lastPatcherFailure = nil
         setInitialSetupMode(true)
-        if updatingRuntime { launcherSectionLabel.stringValue = "Runtime Update" }
         playButton.isEnabled = false
         startSetupAnimation()
         updateButton.isEnabled = false
@@ -983,25 +1014,20 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     }
 
     private func setInitialSetupMode(_ active: Bool) {
-        launcherSectionLabel.stringValue = "Initial Setup"
-        launcherSectionLabel.textColor = Self.accentColor
+        launcherSectionLabel.stringValue = state == "needs_runtime_update" ? "Runtime Update" : "Initial Setup"
         launcherSectionLabel.isHidden = !active
         setupInfo.isHidden = !active
         fileActions.isHidden = active
         if active { setReadyLayout(false) }
         sectionDivider.isHidden = active
-        officialSectionLabel.isHidden = active
-        accountActions.isHidden = active
-        maintenanceCard.isHidden = active
+        officialSectionLabel.isHidden = false
+        accountActions.isHidden = false
+        maintenanceCard.isHidden = false
     }
 
     private func setReadyLayout(_ active: Bool) {
-        if detailLabel.isHidden != active {
-            detailLabel.isHidden = active
-        }
-        if graphicsBackendRow.isHidden == active {
-            graphicsBackendRow.isHidden = !active
-        }
+        graphicsBackendRow.isHidden = !active
+        graphicsBackendRow.alphaValue = 1
     }
 
     private var selectedGraphicsBackend: GraphicsBackend {
