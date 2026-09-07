@@ -14,7 +14,7 @@ struct RuntimeAsset {
     let sha256: String
     static let wine = RuntimeAsset(label: "Wine", url: URL(string: "https://github.com/Sikarugir-App/Engines/releases/download/v1.0/WS12WineSikarugir10.0_6.tar.xz")!, sha256: "9da7ee0cbf386522f3a9906943726d9c3c125dbbd9ab120e3cde80e88d6091b2")
     static let graphics = RuntimeAsset(label: "DXMT graphics", url: URL(string: "https://github.com/3Shain/dxmt/releases/download/v0.80/dxmt-v0.80-builtin.tar.gz")!, sha256: "8f260e36b5739e68f3bad613381441385c4dc7b85b78ba8de653d5a6a264529d")
-    static let libraries = RuntimeAsset(label: "Wine support libraries", url: URL(string: "https://github.com/Sikarugir-App/Wrapper/releases/download/v1.0/Template-1.0.11.tar.xz")!, sha256: "9fa15479e7ff6abd99c1d07be285fb95f41fc6991586502427152b1f7d6ccb8a")
+    static let libraries = RuntimeAsset(label: "Wine support libraries", url: URL(string: "https://github.com/Sikarugir-App/Wrapper/releases/download/v1.0/Template-1.0.15.tar.xz")!, sha256: "34273bcce885ce5a7fd6937af9ea344bb9961de7d55d6193f7413142e835c8c3")
     static let dxvk = RuntimeAsset(label: "DXVK graphics", url: URL(string: "https://github.com/Gcenx/DXVK-macOS/releases/download/v1.10.3/dxvk-v1.10.3.tar.gz")!, sha256: "5644f5c02e8dc3e25171e6b7b5d16e927332b32136c6caf8e418e1192cc2e5d4")
 }
 
@@ -94,6 +94,7 @@ struct D3DMetalInstaller {
         let extracted = extractedRoot.appendingPathComponent(root, isDirectory: true)
         let required = [
             "wine/x86_64-windows/d3d11.dll",
+            "wine/x86_64-windows/d3d12.dll",
             "wine/x86_64-windows/dxgi.dll",
             "wine/x86_64-unix/d3d11.so",
             "wine/x86_64-unix/dxgi.so",
@@ -103,7 +104,7 @@ struct D3DMetalInstaller {
         guard required.allSatisfy({ manager.fileExists(atPath: extracted.appendingPathComponent($0).path) }) else {
             throw PatcherSetupError.message("The support package contains an incomplete D3DMetal installation.")
         }
-        try "d3dmetal-3.0-template-1.0.11".write(to: extracted.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
+        try "d3dmetal-3.0-template-1.0.15".write(to: extracted.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
 
         try manager.createDirectory(at: paths.d3dMetal.deletingLastPathComponent(), withIntermediateDirectories: true)
         if manager.fileExists(atPath: paths.d3dMetal.path) {

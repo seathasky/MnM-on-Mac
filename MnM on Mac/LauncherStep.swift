@@ -10,7 +10,7 @@ enum LauncherStep {
 
     init?(readiness: String) {
         switch readiness {
-        case "needs_wine", "needs_libraries", "needs_prefix", "needs_rosetta": self = .setup
+        case "needs_wine", "needs_libraries", "needs_runtime_update", "needs_prefix", "needs_rosetta": self = .setup
         case "needs_login", "needs_game", "missing_launcher": self = .update
         case "ready": self = .play
         default: return nil

@@ -6,7 +6,6 @@
 //
 
 import AppKit
-import WebKit
 
 private struct GitHubRelease: Decodable {
     let tagName: String
@@ -19,6 +18,17 @@ private struct GitHubRelease: Decodable {
 }
 
 private let hiddenSetupDotAttribute = NSAttributedString.Key("MnMHiddenSetupDot")
+
+final class CoverImageView: NSImageView {
+    override func draw(_ dirtyRect: NSRect) {
+        guard let image else { return }
+        let scale = max(bounds.width / image.size.width, bounds.height / image.size.height)
+        let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
+        let frame = NSRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2,
+                           width: size.width, height: size.height)
+        image.draw(in: frame, from: .zero, operation: .sourceOver, fraction: 1)
+    }
+}
 
 final class PrimaryActionCell: NSButtonCell {
     private let accentColor = NSColor(calibratedRed: 0.94, green: 0.31, blue: 0.035, alpha: 1)
@@ -37,6 +47,83 @@ final class PrimaryActionCell: NSButtonCell {
         }
         return super.drawTitle(styled, withFrame: frame, in: controlView)
     }
+}
+
+final class GhostActionCell: NSButtonCell {
+    private let tintColor: NSColor
+
+    init(textCell: String, tintColor: NSColor = .labelColor) {
+        self.tintColor = tintColor
+        super.init(textCell: textCell)
+    }
+
+    required init(coder: NSCoder) {
+        tintColor = .labelColor
+        super.init(coder: coder)
+    }
+
+    override func drawBezel(withFrame frame: NSRect, in controlView: NSView) {
+        (isEnabled ? tintColor.withAlphaComponent(0.3) : NSColor.white.withAlphaComponent(0.12)).setStroke()
+        NSBezierPath(roundedRect: frame.insetBy(dx: 0.5, dy: 0.5), xRadius: 7, yRadius: 7).stroke()
+    }
+
+    override func titleRect(forBounds rect: NSRect) -> NSRect {
+        rect.insetBy(dx: 12, dy: 0)
+    }
+
+    override func drawTitle(_ title: NSAttributedString, withFrame frame: NSRect, in controlView: NSView) -> NSRect {
+        let styled = NSMutableAttributedString(attributedString: title)
+        styled.addAttributes([
+            .font: NSFont.systemFont(ofSize: 13, weight: .medium),
+            .foregroundColor: isEnabled ? tintColor.withAlphaComponent(0.6) : NSColor.secondaryLabelColor
+        ], range: NSRange(location: 0, length: styled.length))
+        return super.drawTitle(styled, withFrame: frame, in: controlView)
+    }
+}
+
+final class HeroCardView: NSVisualEffectView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        material = .hudWindow
+        blendingMode = .withinWindow
+        state = .active
+        wantsLayer = true
+        layer?.cornerRadius = 12
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOpacity = 0.25
+        layer?.shadowRadius = 8
+        layer?.shadowOffset = NSSize(width: 0, height: -2)
+
+        let tintView = NSView()
+        tintView.wantsLayer = true
+        tintView.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.1).cgColor
+        tintView.layer?.cornerRadius = 11
+        tintView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(tintView)
+        NSLayoutConstraint.activate([
+            tintView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            tintView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            tintView.topAnchor.constraint(equalTo: topAnchor),
+            tintView.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+    }
+
+    required init?(coder: NSCoder) { nil }
+}
+
+final class MaintenanceCardView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.35).cgColor
+        layer?.cornerRadius = 10
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.04).cgColor
+    }
+
+    required init?(coder: NSCoder) { nil }
 }
 
 struct HelperResult {
@@ -88,7 +175,7 @@ enum MnMOnMac {
     }
 }
 
-final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate {
+final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private static let updatesURL = URL(string: "https://monstersandmemories.com/updates")!
     private static let masterUserAgreementURL = URL(string: "https://account.monstersandmemories.com/policy/mau")!
     private static let latestReleaseAPIURL = URL(string: "https://api.github.com/repos/seathasky/MnM-on-Mac/releases/latest")!
@@ -97,12 +184,14 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private static let hideWelcomeKey = "MnMHideWelcomeExplanation"
     private static let graphicsBackendKey = "MnMGraphicsBackend"
     private static let confirmedDXVKKey = "MnMConfirmedDXVKRisk"
+    private static let confirmedKosmicKrispKey = "MnMConfirmedKosmicKrispRisk"
     private static let confirmedD3DMetalKey = "MnMConfirmedD3DMetalLicense"
     private static let metalPerformanceHUDKey = "MnMMetalPerformanceHUD"
     private static let dxvkPerformanceHUDKey = "MnMDXVKPerformanceHUD"
+    private static let kosmicKrispPerformanceHUDKey = "MnMKosmicKrispPerformanceHUD"
     private static let d3dMetalPerformanceHUDKey = "MnMD3DMetalPerformanceHUD"
+    private static let gameModeKey = "MnMGameMode"
     private var window: NSWindow!
-    private var updatesWebView: WKWebView!
     private let statusLabel = NSTextField(wrappingLabelWithString: "Checking your game…")
     private let detailLabel = NSTextField(wrappingLabelWithString: "")
     private var playButton: NSButton!
@@ -120,6 +209,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private var graphicsBackendButton: NSPopUpButton!
     private var officialSectionLabel: NSTextField!
     private var sectionDivider: NSView!
+    private var maintenanceCard: NSView!
     private var thirdPartyButton: NSButton!
     private var versionButton: NSButton!
     private var hudButton: NSButton!
@@ -138,6 +228,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private var setupAnimationFrame = 1
     private var lastGameStatusUpdate: TimeInterval = 0
     private var thirdPartyWindow: NSWindow?
+    private let gameModeController = GameModeController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
@@ -258,17 +349,18 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         graphicsBackendLabel.setContentHuggingPriority(.required, for: .horizontal)
         graphicsBackendLabel.widthAnchor.constraint(equalToConstant: 56).isActive = true
         graphicsBackendButton = NSPopUpButton(frame: .zero, pullsDown: false)
-        graphicsBackendButton.addItem(withTitle: "DXMT (Recommended)")
-        graphicsBackendButton.addItem(withTitle: "D3DMetal")
+        graphicsBackendButton.addItem(withTitle: "D3DMetal (Recommended)")
+        graphicsBackendButton.addItem(withTitle: "DXMT")
         graphicsBackendButton.addItem(withTitle: "DXVK (Experimental)")
         switch selectedGraphicsBackend {
-        case .metal: graphicsBackendButton.selectItem(at: 0)
+        case .metal: graphicsBackendButton.selectItem(at: 1)
         case .dxvk: graphicsBackendButton.selectItem(at: 2)
-        case .d3dMetal: graphicsBackendButton.selectItem(at: 1)
+        case .kosmicKrisp: graphicsBackendButton.selectItem(at: 0)
+        case .d3dMetal: graphicsBackendButton.selectItem(at: 0)
         }
         graphicsBackendButton.target = self
         graphicsBackendButton.action = #selector(graphicsBackendChanged)
-        graphicsBackendButton.toolTip = "DXMT is recommended. Other graphics options download on first use and use separate Windows environments."
+        graphicsBackendButton.toolTip = "D3DMetal is recommended. Graphics options download on first use and use separate Windows environments."
         graphicsBackendButton.setAccessibilityLabel("Graphics backend")
         graphicsBackendButton.setAccessibilityHelp("Choose the graphics translation used to launch the game.")
         graphicsBackendButton.controlSize = .regular
@@ -278,11 +370,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                              target: self, action: #selector(showPerformanceHUDMenu))
         hudButton.isBordered = false
         hudButton.imagePosition = .imageOnly
-        let hudEnabled = performanceHUDEnabled
-        hudButton.contentTintColor = hudEnabled ? .systemGreen : .secondaryLabelColor
-        hudButton.toolTip = "Performance HUD: \(hudEnabled ? "On" : "Off")"
-        hudButton.setAccessibilityLabel("Performance HUD settings")
-        hudButton.setAccessibilityValue(hudEnabled ? "On" : "Off")
+        updatePerformanceHUDButtonAppearance()
         hudButton.widthAnchor.constraint(equalToConstant: 24).isActive = true
         hudButton.heightAnchor.constraint(equalToConstant: 22).isActive = true
         graphicsBackendRow = NSStackView(views: [graphicsBackendLabel, graphicsBackendButton, hudButton])
@@ -308,14 +396,18 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         playButton.widthAnchor.constraint(equalToConstant: 300).isActive = true
         playButton.heightAnchor.constraint(equalToConstant: 46).isActive = true
 
-        updateButton = NSButton(title: "Update / Log In", target: self, action: #selector(update))
-        updateButton.bezelStyle = .rounded
+        updateButton = NSButton(title: "Install / Update / Login", target: self, action: #selector(update))
+        updateButton.cell = GhostActionCell(textCell: "Install / Update / Login")
+        updateButton.isBordered = true
+        updateButton.bezelStyle = .regularSquare
         updateButton.controlSize = .large
         updateButton.widthAnchor.constraint(equalToConstant: 300).isActive = true
         updateButton.heightAnchor.constraint(equalToConstant: 34).isActive = true
 
         reauthenticateButton = NSButton(title: "Re-authenticate…", target: self, action: #selector(reauthenticate))
-        reauthenticateButton.bezelStyle = .rounded
+        reauthenticateButton.cell = GhostActionCell(textCell: "Re-authenticate…", tintColor: .systemRed)
+        reauthenticateButton.isBordered = true
+        reauthenticateButton.bezelStyle = .regularSquare
         reauthenticateButton.controlSize = .large
         reauthenticateButton.widthAnchor.constraint(equalToConstant: 300).isActive = true
         reauthenticateButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
@@ -341,9 +433,19 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         setupInfo.spacing = 6
         setupInfo.edgeInsets = NSEdgeInsets(top: 22, left: 0, bottom: 0, right: 0)
         setupInfo.isHidden = true
-        officialSectionLabel = NSTextField(labelWithString: "Official MnM Launcher")
-        officialSectionLabel.font = .systemFont(ofSize: 11, weight: .semibold)
-        officialSectionLabel.textColor = .secondaryLabelColor
+        let labelColor = NSColor.white.withAlphaComponent(0.4)
+        let labelFont = NSFont.systemFont(ofSize: 10, weight: .bold)
+        let italicLabelFont = NSFontManager.shared.convert(labelFont, toHaveTrait: .italicFontMask)
+        let labelText = NSMutableAttributedString(string: "Official MnM Launcher", attributes: [
+            .font: labelFont,
+            .foregroundColor: labelColor
+        ])
+        let italicText = NSAttributedString(string: " (used for setup only)", attributes: [
+            .font: italicLabelFont,
+            .foregroundColor: NSColor.systemRed.withAlphaComponent(0.6)
+        ])
+        labelText.append(italicText)
+        officialSectionLabel = NSTextField(labelWithAttributedString: labelText)
         sectionDivider = NSView()
         sectionDivider.wantsLayer = true
         sectionDivider.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.09).cgColor
@@ -351,10 +453,10 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         sectionDivider.heightAnchor.constraint(equalToConstant: 1).isActive = true
 
         folderButton = NSButton(title: "Choose Game Folder…", target: self, action: #selector(chooseFolder))
-        folderButton.bezelStyle = .rounded
+        folderButton.bezelStyle = .inline
         folderButton.font = .systemFont(ofSize: 11)
         let installDirectoryButton = NSButton(title: "Game Files", target: self, action: #selector(openInstallDirectory))
-        installDirectoryButton.bezelStyle = .rounded
+        installDirectoryButton.bezelStyle = .inline
         installDirectoryButton.font = .systemFont(ofSize: 11)
         fileActions = NSStackView(views: [installDirectoryButton, folderButton])
         fileActions.orientation = .horizontal
@@ -396,7 +498,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         let footerDivider = NSView()
         footerDivider.wantsLayer = true
         footerDivider.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.09).cgColor
-        footerDivider.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        footerDivider.widthAnchor.constraint(equalToConstant: 332).isActive = true
         footerDivider.heightAnchor.constraint(equalToConstant: 1).isActive = true
 
         versionButton.setContentHuggingPriority(.required, for: .horizontal)
@@ -413,7 +515,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             view.translatesAutoresizingMaskIntoConstraints = false
             footerLinks.addSubview(view)
         }
-        footerLinks.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        footerLinks.widthAnchor.constraint(equalToConstant: 332).isActive = true
         footerLinks.heightAnchor.constraint(equalToConstant: 22).isActive = true
         NSLayoutConstraint.activate([
             versionButton.leadingAnchor.constraint(equalTo: footerLinks.leadingAnchor),
@@ -422,24 +524,54 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             footerRightLinks.centerYAnchor.constraint(equalTo: footerLinks.centerYAnchor)
         ])
 
+        let heroContent = NSStackView(views: [identity, launcherSectionLabel, statusGroup, graphicsBackendRow,
+                                              playButton, setupInfo, fileActions])
+        heroContent.orientation = .vertical
+        heroContent.alignment = .leading
+        heroContent.spacing = 7
+        heroContent.setCustomSpacing(16, after: identity)
+        heroContent.setCustomSpacing(8, after: launcherSectionLabel)
+        heroContent.setCustomSpacing(10, after: statusGroup)
+        heroContent.setCustomSpacing(9, after: graphicsBackendRow)
+        heroContent.setCustomSpacing(10, after: fileActions)
+
+        let heroCard = HeroCardView()
+        heroCard.translatesAutoresizingMaskIntoConstraints = false
+        heroContent.translatesAutoresizingMaskIntoConstraints = false
+        heroCard.addSubview(heroContent)
+        NSLayoutConstraint.activate([
+            heroContent.leadingAnchor.constraint(equalTo: heroCard.leadingAnchor, constant: 16),
+            heroContent.trailingAnchor.constraint(equalTo: heroCard.trailingAnchor, constant: -16),
+            heroContent.topAnchor.constraint(equalTo: heroCard.topAnchor, constant: 16),
+            heroContent.bottomAnchor.constraint(equalTo: heroCard.bottomAnchor, constant: -16)
+        ])
+
+        let maintenanceContent = NSStackView(views: [officialSectionLabel, accountActions, setupLogButton])
+        maintenanceContent.orientation = .vertical
+        maintenanceContent.alignment = .leading
+        maintenanceContent.spacing = 7
+        maintenanceContent.setCustomSpacing(3, after: officialSectionLabel)
+        maintenanceContent.setCustomSpacing(10, after: accountActions)
+
+        maintenanceCard = MaintenanceCardView()
+        maintenanceCard.translatesAutoresizingMaskIntoConstraints = false
+        maintenanceContent.translatesAutoresizingMaskIntoConstraints = false
+        maintenanceCard.addSubview(maintenanceContent)
+        NSLayoutConstraint.activate([
+            maintenanceContent.leadingAnchor.constraint(equalTo: maintenanceCard.leadingAnchor, constant: 16),
+            maintenanceContent.trailingAnchor.constraint(equalTo: maintenanceCard.trailingAnchor, constant: -16),
+            maintenanceContent.topAnchor.constraint(equalTo: maintenanceCard.topAnchor, constant: 12),
+            maintenanceContent.bottomAnchor.constraint(equalTo: maintenanceCard.bottomAnchor, constant: -12)
+        ])
+
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .vertical)
         spacer.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
-        let controls = NSStackView(views: [identity, launcherSectionLabel, statusGroup, graphicsBackendRow, playButton,
-                                           setupInfo,
-                                           fileActions, sectionDivider, officialSectionLabel, accountActions,
-                                           setupLogButton, footerDivider, spacer, footerLinks])
+        let controls = NSStackView(views: [heroCard, maintenanceCard, spacer, footerDivider, footerLinks])
         controls.orientation = .vertical
         controls.alignment = .leading
-        controls.spacing = 7
-        controls.setCustomSpacing(16, after: identity)
-        controls.setCustomSpacing(8, after: launcherSectionLabel)
-        controls.setCustomSpacing(10, after: statusGroup)
-        controls.setCustomSpacing(9, after: graphicsBackendRow)
-        controls.setCustomSpacing(10, after: fileActions)
-        controls.setCustomSpacing(10, after: sectionDivider)
-        controls.setCustomSpacing(3, after: officialSectionLabel)
-        controls.setCustomSpacing(10, after: accountActions)
+        controls.spacing = 16
+        controls.setCustomSpacing(8, after: footerDivider)
         controls.translatesAutoresizingMaskIntoConstraints = false
 
         let controlsPanel = NSView()
@@ -463,277 +595,15 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                          .underlineStyle: NSUnderlineStyle.single.rawValue])
         updatesLink.translatesAutoresizingMaskIntoConstraints = false
 
-        let webConfiguration = WKWebViewConfiguration()
-        webConfiguration.websiteDataStore = .nonPersistent()
-        let websiteStyle = #"""
-        const style = document.createElement('style');
-        style.textContent = `
-            :root { color-scheme: dark; }
-            html, body, #siteWrapper, #page { max-width: 100% !important; overflow-x: hidden !important; }
-            html, body { background: #121212 !important; }
-            body::before, body::after { content: none !important; display: none !important; }
-            [class*="cookie" i], [id*="cookie" i] { display: none !important; }
-            #header { display: none !important; }
-            #page { margin-top: 0 !important; }
-            #mnm-background { position: fixed !important; inset: 0 !important; z-index: 0 !important; width: 100% !important; height: 100% !important; object-fit: cover !important; filter: saturate(.82) brightness(.58) !important; }
-            #mnm-shade { position: fixed !important; inset: 0 !important; z-index: 1 !important; background: linear-gradient(180deg, rgba(8,8,8,.12), rgba(8,8,8,.48)) !important; pointer-events: none !important; }
-            #mnm-carousel { position: relative !important; z-index: 2 !important; box-sizing: border-box !important; display: flex !important; align-items: center !important; height: 100vh !important; padding: 27px 42px 14px !important; overflow: hidden !important; background: transparent !important; user-select: none !important; -webkit-user-select: none !important; }
-            #mnm-track { display: grid !important; grid-auto-flow: column !important; grid-auto-columns: 100% !important; gap: 0 !important; width: 100% !important; overflow-x: auto !important; overflow-y: hidden !important; scroll-snap-type: x mandatory !important; scrollbar-width: none !important; }
-            #mnm-track::-webkit-scrollbar { display: none !important; }
-            #mnm-progress { position: absolute !important; left: 42px !important; right: 42px !important; top: 9px !important; height: 7px !important; overflow: hidden !important; border-radius: 999px !important; background: rgba(0,0,0,.62) !important; box-shadow: inset 0 0 0 1px rgba(255,255,255,.08) !important; cursor: pointer !important; touch-action: none !important; }
-            #mnm-progress-thumb { height: 100% !important; border-radius: inherit !important; background: rgba(255,255,255,.58) !important; box-shadow: 0 0 0 1px rgba(255,255,255,.08) !important; transition: transform .8s cubic-bezier(.22,.72,.2,1) !important; cursor: grab !important; }
-            .mnm-card { min-width: 0 !important; scroll-snap-align: start !important; }
-            .mnm-card a { display: block !important; width: min(100%, 500px) !important; margin: 0 auto !important; color: inherit !important; text-decoration: none !important; }
-            .mnm-card img { display: block !important; width: 100% !important; height: min(168px, calc(100vh - 130px)) !important; object-fit: cover !important; background: #242424 !important; }
-            .mnm-date { margin-top: 9px !important; color: rgba(255,255,255,.68) !important; font-size: 12px !important; }
-            .mnm-title { margin: 4px 0 0 !important; color: #fff !important; font-family: inherit !important; font-size: 18px !important; font-weight: 500 !important; line-height: 1.12 !important; }
-            .mnm-more { display: inline-block !important; margin-top: 10px !important; padding-bottom: 3px !important; border-bottom: 1px solid rgba(255,255,255,.72) !important; color: rgba(255,255,255,.9) !important; font-size: 13px !important; }
-            ::-webkit-scrollbar { width: 10px; height: 10px; }
-            ::-webkit-scrollbar-track { background: #121212; }
-            ::-webkit-scrollbar-thumb { background: #454545; border: 2px solid #121212; border-radius: 8px; }
-            ::-webkit-scrollbar-thumb:hover { background: #5a5a5a; }
-        `;
-        document.documentElement.appendChild(style);
-        const makeCarousel = () => {
-            if (document.getElementById('mnm-background')) return true;
-            const wallpaper = document.createElement('img');
-            wallpaper.id = 'mnm-background';
-            wallpaper.src = 'https://images.squarespace-cdn.com/content/v1/603cb2299959d83fcdc26265/4aa518fb-9bfe-4170-9aed-077c9b43315f/GelatenousCube.png';
-            wallpaper.alt = '';
-            const wallpaperShade = document.createElement('div');
-            wallpaperShade.id = 'mnm-shade';
-            document.body.replaceChildren(wallpaper, wallpaperShade);
-            return true;
-            const readLinks = [...document.querySelectorAll('a')].filter(link => /read more/i.test(link.textContent || ''));
-            const updates = [];
-            const seen = new Set();
-            for (const readLink of readLinks) {
-                let card = readLink;
-                for (let depth = 0; depth < 10 && card; depth++, card = card.parentElement) {
-                    if (card.querySelector('img') && card.querySelector('h1,h2,h3,h4')) break;
-                }
-                if (!card) continue;
-                const image = card.querySelector('img');
-                const heading = card.querySelector('h1,h2,h3,h4');
-                const articleLink = heading?.closest('a') || heading?.querySelector('a') || card.querySelector('a[href]:not([href="#"])');
-                const href = articleLink?.href || readLink.href;
-                const source = image?.currentSrc || image?.src || image?.dataset?.src;
-                if (!heading || !href || !source || seen.has(href)) continue;
-                seen.add(href);
-                const time = card.querySelector('time');
-                const match = (card.textContent || '').match(/(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}|\d{1,2}\/\d{1,2}\/\d{2,4}/i);
-                updates.push({ href, source, title: heading.textContent.trim(), date: time?.textContent.trim() || match?.[0] || '' });
-            }
-            if (updates.length < 2) return false;
-            const shade = document.createElement('div');
-            shade.id = 'mnm-shade';
-            const root = document.createElement('main');
-            root.id = 'mnm-carousel';
-            const track = document.createElement('div');
-            track.id = 'mnm-track';
-            for (const update of updates) {
-                const card = document.createElement('article');
-                card.className = 'mnm-card';
-                const anchor = document.createElement('a');
-                anchor.href = update.href;
-                const image = document.createElement('img');
-                image.src = update.source;
-                image.alt = '';
-                image.draggable = false;
-                const date = document.createElement('div');
-                date.className = 'mnm-date';
-                date.textContent = update.date;
-                const title = document.createElement('h2');
-                title.className = 'mnm-title';
-                title.textContent = update.title;
-                const more = document.createElement('span');
-                more.className = 'mnm-more';
-                more.textContent = 'Read more →';
-                anchor.append(image, date, title, more);
-                card.appendChild(anchor);
-                track.appendChild(card);
-            }
-            for (const card of [...track.children].slice(0, 1)) track.appendChild(card.cloneNode(true));
-            const progress = document.createElement('div');
-            progress.id = 'mnm-progress';
-            const progressThumb = document.createElement('div');
-            progressThumb.id = 'mnm-progress-thumb';
-            progress.appendChild(progressThumb);
-            root.append(track, progress);
-            document.body.replaceChildren(shade, root);
-            const frame = document.createElement('iframe');
-            frame.src = '/';
-            frame.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;border:0;';
-            frame.addEventListener('load', () => {
-                let attempts = 0;
-                const attachBackground = () => {
-                    const sourceVideo = frame.contentDocument?.querySelector('video[autoplay], video');
-                    const source = sourceVideo?.currentSrc || sourceVideo?.src || sourceVideo?.querySelector('source')?.src;
-                    if (sourceVideo && source) {
-                        const background = sourceVideo.cloneNode(true);
-                        background.id = 'mnm-background';
-                        background.src = source;
-                        background.autoplay = true;
-                        background.loop = true;
-                        background.muted = true;
-                        background.playsInline = true;
-                        background.removeAttribute('controls');
-                        document.body.insertBefore(background, shade);
-                        background.play().catch(() => {});
-                        frame.remove();
-                        return;
-                    }
-                    if (++attempts < 80) setTimeout(attachBackground, 250);
-                    else frame.remove();
-                };
-                attachBackground();
-            });
-            document.body.appendChild(frame);
-            const removeCookieControls = () => {
-                for (const element of document.querySelectorAll('button,a')) {
-                    if ((element.textContent || '').trim() === 'Cookie Preferences') element.remove();
-                }
-            };
-            removeCookieControls();
-            new MutationObserver(removeCookieControls).observe(document.body, { childList: true, subtree: true });
-            let currentIndex = 0;
-            const lastIndex = Math.max(0, updates.length - 1);
-            let rotationTimer;
-            let animationFrame;
-            let isMoving = false;
-            const cardStep = () => track.clientWidth;
-            progressThumb.style.width = `${Math.max(12, 100 / updates.length)}%`;
-            const updateProgress = () => {
-                const travel = Math.max(0, progress.clientWidth - progressThumb.offsetWidth);
-                const position = lastIndex ? currentIndex / lastIndex : 0;
-                progressThumb.style.transform = `translateX(${position * travel}px)`;
-            };
-            const animateTo = (target, completion) => {
-                cancelAnimationFrame(animationFrame);
-                const start = track.scrollLeft;
-                const distance = target - start;
-                const started = performance.now();
-                track.style.scrollSnapType = 'none';
-                const animate = now => {
-                    const amount = Math.min(1, (now - started) / 900);
-                    const eased = 0.5 - Math.cos(Math.PI * amount) / 2;
-                    track.scrollLeft = start + distance * eased;
-                    if (amount < 1) animationFrame = requestAnimationFrame(animate);
-                    else {
-                        track.style.scrollSnapType = 'x mandatory';
-                        completion?.();
-                    }
-                };
-                animationFrame = requestAnimationFrame(animate);
-            };
-            const scheduleRotation = () => {
-                clearTimeout(rotationTimer);
-                if (!document.hidden) rotationTimer = setTimeout(() => move(1), 6500);
-            };
-            const move = direction => {
-                if (isMoving) return;
-                clearTimeout(rotationTimer);
-                isMoving = true;
-                if (direction > 0 && currentIndex >= lastIndex) {
-                    currentIndex = 0;
-                    updateProgress();
-                    animateTo(updates.length * cardStep(), () => {
-                        track.scrollLeft = 0;
-                        isMoving = false;
-                        scheduleRotation();
-                    });
-                } else if (direction < 0 && currentIndex <= 0) {
-                    track.scrollLeft = updates.length * cardStep();
-                    currentIndex = lastIndex;
-                    updateProgress();
-                    animateTo(currentIndex * cardStep(), () => {
-                        isMoving = false;
-                        scheduleRotation();
-                    });
-                } else {
-                    currentIndex += direction;
-                    updateProgress();
-                    animateTo(currentIndex * cardStep(), () => {
-                        isMoving = false;
-                        scheduleRotation();
-                    });
-                }
-            };
-            window.mnmMove = move;
-            track.addEventListener('mouseenter', () => clearTimeout(rotationTimer));
-            track.addEventListener('mouseleave', scheduleRotation);
-            let isDragging = false;
-            const dragPosition = event => {
-                const bounds = progress.getBoundingClientRect();
-                const thumbWidth = progressThumb.offsetWidth;
-                const travel = Math.max(1, bounds.width - thumbWidth);
-                const position = Math.max(0, Math.min(1, (event.clientX - bounds.left - thumbWidth / 2) / travel));
-                track.scrollLeft = position * lastIndex * cardStep();
-                progressThumb.style.transform = `translateX(${position * travel}px)`;
-                currentIndex = Math.round(position * lastIndex);
-            };
-            progress.addEventListener('pointerdown', event => {
-                event.preventDefault();
-                document.getSelection()?.removeAllRanges();
-                clearTimeout(rotationTimer);
-                cancelAnimationFrame(animationFrame);
-                isMoving = false;
-                isDragging = true;
-                progress.setPointerCapture(event.pointerId);
-                progressThumb.style.transition = 'none';
-                progressThumb.style.cursor = 'grabbing';
-                track.style.scrollSnapType = 'none';
-                dragPosition(event);
-            });
-            progress.addEventListener('pointermove', event => {
-                if (isDragging) {
-                    event.preventDefault();
-                    dragPosition(event);
-                }
-            });
-            const finishDragging = event => {
-                if (!isDragging) return;
-                isDragging = false;
-                if (progress.hasPointerCapture(event.pointerId)) progress.releasePointerCapture(event.pointerId);
-                progressThumb.style.transition = '';
-                progressThumb.style.cursor = '';
-                isMoving = true;
-                animateTo(currentIndex * cardStep(), () => {
-                    isMoving = false;
-                    updateProgress();
-                    scheduleRotation();
-                });
-            };
-            progress.addEventListener('pointerup', finishDragging);
-            progress.addEventListener('pointercancel', finishDragging);
-            root.addEventListener('dragstart', event => event.preventDefault());
-            document.addEventListener('visibilitychange', () => document.hidden ? clearTimeout(rotationTimer) : scheduleRotation());
-            requestAnimationFrame(updateProgress);
-            window.addEventListener('resize', updateProgress);
-            scheduleRotation();
-            return true;
-        };
-        let wallpaperAttempts = 0;
-        const attachWallpaper = () => {
-            if (makeCarousel()) return;
-            if (++wallpaperAttempts < 120) setTimeout(attachWallpaper, 250);
-        };
-        attachWallpaper();
-        """#
-        webConfiguration.userContentController.addUserScript(
-            WKUserScript(source: websiteStyle, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
-        updatesWebView = WKWebView(frame: .zero, configuration: webConfiguration)
-        updatesWebView.navigationDelegate = self
-        updatesWebView.allowsMagnification = true
-        updatesWebView.pageZoom = 1
-        updatesWebView.translatesAutoresizingMaskIntoConstraints = false
-        updatesWebView.load(URLRequest(url: Self.updatesURL))
+        let backgroundImage = NSImage(contentsOf: Bundle.main.url(forResource: "GelatenousCube", withExtension: "png")!)!
+        let backgroundImageView = CoverImageView(image: backgroundImage)
+        backgroundImageView.translatesAutoresizingMaskIntoConstraints = false
 
         let websitePanel = NSView()
         websitePanel.wantsLayer = true
         websitePanel.layer?.backgroundColor = NSColor(calibratedWhite: 0.105, alpha: 1).cgColor
         websitePanel.translatesAutoresizingMaskIntoConstraints = false
-        websitePanel.addSubview(updatesWebView)
+        websitePanel.addSubview(backgroundImageView)
         websitePanel.addSubview(updatesLink)
 
         guard let contentView = window.contentView else { return }
@@ -749,17 +619,17 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             controlsPanel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             controlsPanel.topAnchor.constraint(equalTo: contentView.topAnchor),
             controlsPanel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
-            controlsPanel.widthAnchor.constraint(equalToConstant: 350),
+            controlsPanel.widthAnchor.constraint(equalToConstant: 382),
 
             panelDivider.leadingAnchor.constraint(equalTo: controlsPanel.leadingAnchor),
             panelDivider.topAnchor.constraint(equalTo: controlsPanel.topAnchor),
             panelDivider.bottomAnchor.constraint(equalTo: controlsPanel.bottomAnchor),
             panelDivider.widthAnchor.constraint(equalToConstant: 1),
 
-            updatesWebView.leadingAnchor.constraint(equalTo: websitePanel.leadingAnchor),
-            updatesWebView.trailingAnchor.constraint(equalTo: websitePanel.trailingAnchor),
-            updatesWebView.topAnchor.constraint(equalTo: websitePanel.topAnchor),
-            updatesWebView.bottomAnchor.constraint(equalTo: websitePanel.bottomAnchor),
+            backgroundImageView.leadingAnchor.constraint(equalTo: websitePanel.leadingAnchor),
+            backgroundImageView.trailingAnchor.constraint(equalTo: websitePanel.trailingAnchor),
+            backgroundImageView.topAnchor.constraint(equalTo: websitePanel.topAnchor),
+            backgroundImageView.bottomAnchor.constraint(equalTo: websitePanel.bottomAnchor),
 
             updatesLink.leadingAnchor.constraint(equalTo: websitePanel.leadingAnchor, constant: 16),
             updatesLink.bottomAnchor.constraint(equalTo: websitePanel.bottomAnchor, constant: -12),
@@ -782,7 +652,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             return override
         }
 #endif
-        return Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.2"
+        return Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.3"
     }
 
     private func normalizedVersion(_ value: String) -> [Int]? {
@@ -845,16 +715,6 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     @objc private func openAvailableRelease() {
         if let availableReleaseURL { NSWorkspace.shared.open(availableReleaseURL) }
-    }
-
-    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
-                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
-            NSWorkspace.shared.open(url)
-            decisionHandler(.cancel)
-            return
-        }
-        decisionHandler(.allow)
     }
 
     private func refresh() {
@@ -930,11 +790,14 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
         state = WineRuntime.readiness
         if state == "ready" { UserDefaults.standard.set(true, forKey: Self.completedInitialSetupKey) }
-        let setupRequired = ["needs_wine", "needs_libraries", "needs_prefix", "missing_launcher"].contains(state)
+        let setupRequired = ["needs_wine", "needs_libraries", "needs_runtime_update", "needs_prefix", "missing_launcher"].contains(state)
         let initialSetup = !UserDefaults.standard.bool(forKey: Self.completedInitialSetupKey)
             && ["needs_login", "needs_game"].contains(state)
         let focusedSetup = setupRequired || initialSetup
         setInitialSetupMode(focusedSetup)
+        if state == "needs_runtime_update" {
+            launcherSectionLabel.stringValue = "Runtime Update"
+        }
         setReadyLayout(state == "ready")
         playButton.title = LauncherStep(readiness: state)?.title ?? "Continue"
         playButton.isEnabled = true
@@ -942,7 +805,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         reauthenticateButton.isEnabled = true
         graphicsBackendButton.isEnabled = true
         updateButton.isHidden = state != "ready"
-        updateButton.title = "Update / Log In"
+        updateButton.title = "Install / Update / Login"
         statusLabel.textColor = .labelColor
         switch state {
         case "ready":
@@ -964,6 +827,10 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         case "needs_libraries":
             statusLabel.stringValue = "Finish setting up Wine"
             detailLabel.stringValue = "About 81 MB • usually takes 2–5 minutes."
+        case "needs_runtime_update":
+            statusLabel.stringValue = "Runtime update available"
+            detailLabel.stringValue = "About 83 MB • your prefixes, login, game files, and settings are preserved."
+            playButton.title = "Update Runtime"
         case "needs_prefix":
             statusLabel.stringValue = "Finish setting up Wine"
             detailLabel.stringValue = "One local configuration step remains."
@@ -998,7 +865,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         default: break
         }
         guard state == "ready", gameProcess?.isRunning != true, patcherProcess?.isRunning != true else { return }
-        if (selectedGraphicsBackend == .dxvk && !WinePaths.current.dxvkInstalled) ||
+        if ((selectedGraphicsBackend == .dxvk || selectedGraphicsBackend == .kosmicKrisp) && !WinePaths.current.dxvkInstalled) ||
            (selectedGraphicsBackend == .d3dMetal && !WinePaths.current.d3dMetalInstalled) {
             graphicsBackendChanged()
             return
@@ -1009,6 +876,9 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
         do {
             lastPatcherFailure = nil
+            if gameModeEnabled && !gameModeController.activate() {
+                throw PatcherSetupError.message("Game Mode could not be enabled. Install Xcode Command Line Tools or turn Game Mode off in the cogwheel menu.")
+            }
             guard let bridge = Bundle.main.url(forResource: "MnMGameBridge", withExtension: nil) else {
                 throw PatcherSetupError.message("The game launch helper is missing from this app.")
             }
@@ -1026,6 +896,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 DispatchQueue.main.async {
                     guard let self = self, self.gameProcess === finished else { return }
                     self.gameProcess = nil
+                    self.gameModeController.deactivate()
                     if finished.terminationStatus != 0 {
                         self.lastPatcherFailure = "The game stopped (code \(finished.terminationStatus)). This Wine build is experimental."
                     }
@@ -1034,15 +905,21 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             }
             gameProcess = process
             try process.run()
-        } catch { gameProcess = nil; lastPatcherFailure = error.localizedDescription }
+        } catch {
+            gameProcess = nil
+            gameModeController.deactivate()
+            lastPatcherFailure = error.localizedDescription
+        }
         refresh()
     }
 
     @objc private func setupWine() {
         guard !busy, storageFailure == nil, patcherProcess?.isRunning != true, gameProcess?.isRunning != true, !GameRunState.isRunning(.current) else { return }
+        let updatingRuntime = state == "needs_runtime_update"
         busy = true
         lastPatcherFailure = nil
         setInitialSetupMode(true)
+        if updatingRuntime { launcherSectionLabel.stringValue = "Runtime Update" }
         playButton.isEnabled = false
         startSetupAnimation()
         updateButton.isEnabled = false
@@ -1050,8 +927,10 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         folderButton.isEnabled = false
         setupLogButton.isHidden = true
         statusLabel.textColor = .labelColor
-        statusLabel.stringValue = "Setting up Wine…"
-        detailLabel.stringValue = "First-time setup usually takes 5–10 minutes, depending on your connection."
+        statusLabel.stringValue = updatingRuntime ? "Updating runtime…" : "Setting up Wine…"
+        detailLabel.stringValue = updatingRuntime
+            ? "Updating support files. Your existing Windows environments and game data will not be changed."
+            : "First-time setup usually takes 5–10 minutes, depending on your connection."
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 try WineInstaller(paths: .current).install { message in
@@ -1113,6 +992,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         sectionDivider.isHidden = active
         officialSectionLabel.isHidden = active
         accountActions.isHidden = active
+        maintenanceCard.isHidden = active
     }
 
     private func setReadyLayout(_ active: Bool) {
@@ -1126,7 +1006,8 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     private var selectedGraphicsBackend: GraphicsBackend {
         guard let value = UserDefaults.standard.string(forKey: Self.graphicsBackendKey),
-              let backend = GraphicsBackend(rawValue: value) else { return .metal }
+              let backend = GraphicsBackend(rawValue: value),
+              backend != .kosmicKrisp else { return .d3dMetal }
         return backend
     }
 
@@ -1134,6 +1015,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         switch selectedGraphicsBackend {
         case .metal: return Self.metalPerformanceHUDKey
         case .dxvk: return Self.dxvkPerformanceHUDKey
+        case .kosmicKrisp: return Self.kosmicKrispPerformanceHUDKey
         case .d3dMetal: return Self.d3dMetalPerformanceHUDKey
         }
     }
@@ -1142,11 +1024,18 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         UserDefaults.standard.bool(forKey: performanceHUDKey)
     }
 
+    private var gameModeEnabled: Bool {
+        UserDefaults.standard.bool(forKey: Self.gameModeKey)
+    }
+
     private func updatePerformanceHUDButtonAppearance() {
-        let enabled = performanceHUDEnabled
-        hudButton.toolTip = "Performance HUD: \(enabled ? "On" : "Off")"
-        hudButton.contentTintColor = enabled ? .systemGreen : .secondaryLabelColor
-        hudButton.setAccessibilityValue(enabled ? "On" : "Off")
+        guard hudButton != nil else { return }
+        let hudEnabled = performanceHUDEnabled
+        let gameMode = gameModeEnabled
+        hudButton.toolTip = "Performance HUD: \(hudEnabled ? "On" : "Off") • Game Mode: \(gameMode ? "On" : "Off")"
+        hudButton.contentTintColor = (hudEnabled || gameMode) ? .systemGreen : .secondaryLabelColor
+        hudButton.setAccessibilityLabel("Graphics, performance, and Game Mode settings")
+        hudButton.setAccessibilityValue("Performance HUD \(hudEnabled ? "on" : "off"), Game Mode \(gameMode ? "on" : "off")")
     }
 
     @objc private func showPerformanceHUDMenu(_ sender: NSButton) {
@@ -1155,14 +1044,23 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         switch selectedGraphicsBackend {
         case .metal: renderer = "DXMT"
         case .dxvk: renderer = "DXVK"
+        case .kosmicKrisp: renderer = "KosmicKrisp"
         case .d3dMetal: renderer = "D3DMetal"
         }
         let item = NSMenuItem(title: "\(renderer) Performance HUD", action: #selector(togglePerformanceHUD), keyEquivalent: "")
         item.target = self
         item.state = performanceHUDEnabled ? .on : .off
         menu.addItem(item)
+        let gameModeItem = NSMenuItem(title: "Game Mode", action: #selector(toggleGameMode), keyEquivalent: "")
+        gameModeItem.target = self
+        gameModeItem.state = gameModeEnabled ? .on : .off
+        gameModeItem.isEnabled = gameModeController.isAvailable
+        menu.addItem(gameModeItem)
         menu.addItem(.separator())
-        let note = NSMenuItem(title: "Applies on next game launch", action: nil, keyEquivalent: "")
+        let noteTitle = gameModeController.isAvailable
+            ? "Applies on next game launch"
+            : "Game Mode requires Xcode Command Line Tools"
+        let note = NSMenuItem(title: noteTitle, action: nil, keyEquivalent: "")
         note.isEnabled = false
         menu.addItem(note)
         menu.popUp(positioning: item, at: NSPoint(x: sender.bounds.midX, y: sender.bounds.maxY + 4), in: sender)
@@ -1174,12 +1072,19 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         updatePerformanceHUDButtonAppearance()
     }
 
+    @objc private func toggleGameMode() {
+        UserDefaults.standard.set(!gameModeEnabled, forKey: Self.gameModeKey)
+        updatePerformanceHUDButtonAppearance()
+    }
+
     @objc private func graphicsBackendChanged() {
         let backend: GraphicsBackend
         switch graphicsBackendButton.indexOfSelectedItem {
-        case 1: backend = .d3dMetal
+        case 0: backend = .d3dMetal
+        case 1: backend = .metal
         case 2: backend = .dxvk
-        default: backend = .metal
+        case 3: backend = .kosmicKrisp
+        default: backend = .d3dMetal
         }
         guard backend != .metal else {
             UserDefaults.standard.set(GraphicsBackend.metal.rawValue, forKey: Self.graphicsBackendKey)
@@ -1187,22 +1092,32 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             return
         }
 
-        let confirmationKey = backend == .dxvk ? Self.confirmedDXVKKey : Self.confirmedD3DMetalKey
+        let confirmationKey: String
+        switch backend {
+        case .dxvk: confirmationKey = Self.confirmedDXVKKey
+        case .kosmicKrisp: confirmationKey = Self.confirmedKosmicKrispKey
+        case .d3dMetal: confirmationKey = Self.confirmedD3DMetalKey
+        case .metal: return
+        }
         if !UserDefaults.standard.bool(forKey: confirmationKey) {
             let alert = NSAlert()
             alert.alertStyle = .warning
             if backend == .dxvk {
                 alert.messageText = "Use Experimental DXVK?"
-                alert.informativeText = "DXVK is an optional third-party graphics backend being tested with Monsters & Memories. It uses a separate copy of the Windows environment, so the normal Metal setup stays untouched. Its maintainer warns that replacing Direct3D libraries in an online game may be unsupported or treated as cheating. Metal remains the recommended option."
+                alert.informativeText = "DXVK is an optional third-party graphics backend being tested with Monsters & Memories. It uses a separate copy of the Windows environment, so the normal setup stays untouched. Its maintainer warns that replacing Direct3D libraries in an online game may be unsupported or treated as cheating. D3DMetal remains the recommended option."
                 alert.addButton(withTitle: "Install & Use DXVK")
+            } else if backend == .kosmicKrisp {
+                alert.messageText = "Use Experimental KosmicKrisp?"
+                alert.informativeText = "KosmicKrisp runs DXVK through a new Vulkan-on-Metal driver included with Sikarugir 1.0.15. It uses a separate Windows environment and may have compatibility, performance, or visual issues. D3DMetal remains the recommended option."
+                alert.addButton(withTitle: "Install & Use KosmicKrisp")
             } else {
-                alert.messageText = "Test D3DMetal?"
-                alert.informativeText = "D3DMetal 3.0 is Apple’s Game Porting Toolkit graphics layer. It is licensed for non-commercial development, testing, and evaluation on Apple hardware. MnM on Mac will download it from the Sikarugir 1.0.11 support package and use a separate Windows environment. Review Apple’s license in About before continuing."
+                alert.messageText = "Use D3DMetal?"
+                alert.informativeText = "D3DMetal 3.0 is Apple’s Game Porting Toolkit graphics layer. It is licensed for non-commercial development, testing, and evaluation on Apple hardware. MnM on Mac will download it from the Sikarugir 1.0.15 support package and use a separate Windows environment. Review Apple’s license in About before continuing."
                 alert.addButton(withTitle: "I Agree & Install")
             }
             alert.addButton(withTitle: "Cancel")
             guard alert.runModal() == .alertFirstButtonReturn else {
-                graphicsBackendButton.selectItem(at: 0)
+                graphicsBackendButton.selectItem(at: 1)
                 UserDefaults.standard.set(GraphicsBackend.metal.rawValue, forKey: Self.graphicsBackendKey)
                 updatePerformanceHUDButtonAppearance()
                 return
@@ -1210,7 +1125,9 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             UserDefaults.standard.set(true, forKey: confirmationKey)
         }
 
-        let alreadyInstalled = backend == .dxvk ? WinePaths.current.dxvkInstalled : WinePaths.current.d3dMetalInstalled
+        let alreadyInstalled = backend == .dxvk || backend == .kosmicKrisp
+            ? WinePaths.current.dxvkInstalled
+            : WinePaths.current.d3dMetalInstalled
         if alreadyInstalled {
             UserDefaults.standard.set(backend.rawValue, forKey: Self.graphicsBackendKey)
             updatePerformanceHUDButtonAppearance()
@@ -1223,7 +1140,13 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         reauthenticateButton.isEnabled = false
         folderButton.isEnabled = false
         graphicsBackendButton.isEnabled = false
-        let displayName = backend == .dxvk ? "DXVK" : "D3DMetal"
+        let displayName: String
+        switch backend {
+        case .dxvk: displayName = "DXVK"
+        case .kosmicKrisp: displayName = "KosmicKrisp"
+        case .d3dMetal: displayName = "D3DMetal"
+        case .metal: displayName = "DXMT"
+        }
         statusLabel.stringValue = "Installing \(displayName)…"
         statusLabel.textColor = .labelColor
         DispatchQueue.global(qos: .userInitiated).async {
@@ -1231,7 +1154,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 let report: (String) -> Void = { message in
                     DispatchQueue.main.async { self.statusLabel.stringValue = message }
                 }
-                if backend == .dxvk {
+                if backend == .dxvk || backend == .kosmicKrisp {
                     try DXVKInstaller(paths: .current).install(progress: report)
                 } else {
                     try D3DMetalInstaller(paths: .current).install(progress: report)
@@ -1245,7 +1168,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             } catch {
                 DispatchQueue.main.async {
                     UserDefaults.standard.set(GraphicsBackend.metal.rawValue, forKey: Self.graphicsBackendKey)
-                    self.graphicsBackendButton.selectItem(at: 0)
+                    self.graphicsBackendButton.selectItem(at: 1)
                     self.updatePerformanceHUDButtonAppearance()
                     self.lastPatcherFailure = error.localizedDescription
                     self.busy = false
@@ -1263,6 +1186,9 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         case "needs_libraries":
             setupInfoTitle.stringValue = "Why support files are needed"
             setupInfoBody.stringValue = "These files supply the Windows libraries and graphics translation required by the official launcher and game."
+        case "needs_runtime_update":
+            setupInfoTitle.stringValue = "What this update changes"
+            setupInfoBody.stringValue = "Only the shared Sikarugir support libraries are updated. Your Wine engine, prefixes, login, game files, and settings stay in place."
         case "needs_prefix":
             setupInfoTitle.stringValue = "Why a Windows environment is needed"
             setupInfoBody.stringValue = "This Windows environment keeps Wine, the official launcher, game files, and settings together without changing the rest of your Mac."
@@ -1329,7 +1255,11 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
         let plan = PatcherLaunchPlan(
             executableURL: URL(fileURLWithPath: nativePath.text).appendingPathComponent("Contents/MacOS/" + PatcherBundleGuard.executableName),
-            workingDirectoryURL: URL(fileURLWithPath: workingPath.text, isDirectory: true))
+            workingDirectoryURL: URL(fileURLWithPath: workingPath.text, isDirectory: true),
+            environmentOverrides: [
+                "MNM_GRAPHICS_BACKEND": selectedGraphicsBackend.rawValue,
+                "MNM_GRAPHICS_HUD": performanceHUDEnabled ? "1" : "0"
+            ])
         do {
             guard let guardExecutable = Bundle.main.url(forResource: PatcherBundleGuard.executableName, withExtension: nil),
                   let bridgeExecutable = Bundle.main.url(forResource: "MnMGameBridge", withExtension: nil),
@@ -1580,9 +1510,15 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         credit("DXVK 1.10.3 for macOS", detail: "Gcenx, Philip Rebohle, and DXVK contributors — the experimental Vulkan-based graphics option.",
                sourceTitle: "macOS Release", source: "https://github.com/Gcenx/DXVK-macOS/releases/tag/v1.10.3",
                licenseTitle: "zlib License", license: "https://github.com/doitsujin/dxvk/blob/v1.10.3/LICENSE")
-        credit("D3DMetal 3.0", detail: "Apple — the Game Porting Toolkit graphics layer, supplied through the Sikarugir 1.0.11 support package for testing.",
+        credit("KosmicKrisp", detail: "Mesa and KosmicKrisp contributors — the experimental Vulkan-on-Metal driver supplied by Sikarugir.",
+               sourceTitle: "Source", source: "https://github.com/Kenji-NX/mesa/tree/main/src/kosmickrisp",
+               licenseTitle: "MIT License", license: "https://github.com/Kenji-NX/mesa/blob/main/docs/license.rst")
+        credit("D3DMetal 3.0", detail: "Apple — the Game Porting Toolkit graphics layer, supplied through the Sikarugir 1.0.15 support package for testing.",
                sourceTitle: "Sikarugir Package", source: "https://github.com/Sikarugir-App/Wrapper/releases/tag/v1.0",
                licenseTitle: "Apple GPTK", license: "https://developer.apple.com/games/game-porting-toolkit/")
+        credit("MacGamingFix", detail: "evertjr — reference implementation for the optional macOS Game Mode control.",
+               sourceTitle: "Source", source: "https://github.com/evertjr/MacGamingFix",
+               licenseTitle: "MIT License", license: "https://github.com/evertjr/MacGamingFix/blob/main/LICENSE")
         credit("wine-msync", detail: "Marzent and contributors — Mach semaphore synchronization for Wine on macOS.",
                sourceTitle: "Source", source: "https://github.com/marzent/wine-msync",
                licenseTitle: "LGPL 2.1 License", license: "https://github.com/marzent/wine-msync/blob/main/LICENSE")
@@ -1633,6 +1569,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     func applicationDidBecomeActive(_ notification: Notification) { refresh() }
+    func applicationWillTerminate(_ notification: Notification) { gameModeController.deactivate() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         window.makeKeyAndOrderFront(nil)
