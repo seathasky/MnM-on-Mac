@@ -15,6 +15,8 @@ The app prepares a self-contained Windows environment using Wine, so no separate
 - Direct game launching after the initial installation
 - Access to the official launcher for login, updates, and repairs
 - Custom game-folder selection
+- Graphics Engine selection including D3DMetal, DXMT and DXVK.
+- Option to enable MacOS Game Mode.
 - Developer ID signed and notarized by Apple
 
 ## Installation
@@ -29,7 +31,7 @@ The first setup downloads Wine and its support files, so it may take several min
 
 ## Updating the Game
 
-Select **Update / Log In** to open the official Monsters & Memories launcher. Let it finish updating, close it, and return to MnM on Mac.
+Select **Install /Update / Login** to open the official Monsters & Memories launcher. Let it finish updating, close it, and return to MnM on Mac.
 
 ## Troubleshooting
 
