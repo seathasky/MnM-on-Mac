@@ -1,6 +1,6 @@
 # MnM on Mac
 
-![MnM on Mac](https://i.imgur.com/HId7ak2.jpeg)
+![MnM on Mac](https://i.imgur.com/eqzUI4T.jpeg)
 
 MnM on Mac is an independent community launcher for installing, updating, and playing [Monsters & Memories](https://monstersandmemories.com/) on macOS.
 
