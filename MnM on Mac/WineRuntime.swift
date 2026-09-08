@@ -124,9 +124,9 @@ enum WineRuntime {
         return "ready"
     }
 
-    static func environment(paths: WinePaths, graphicsBackend: GraphicsBackend = .metal, showHUD: Bool = false) -> [String: String] {
+    static func environment(paths: WinePaths, graphicsBackend: GraphicsBackend = .metal, showHUD: Bool = false, msyncEnabled: Bool = true) -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
-        for key in Array(environment.keys) where key.hasPrefix("WINE") || key.hasPrefix("CX_") || key.hasPrefix("DYLD_") || key.hasPrefix("VK_") || key.hasPrefix("MNM_PLAY_") || key.hasPrefix("MNM_GRAPHICS_") || key == "MTL_HUD_ENABLED" {
+        for key in Array(environment.keys) where key.hasPrefix("WINE") || key.hasPrefix("CX_") || key.hasPrefix("DYLD_") || key.hasPrefix("VK_") || key.hasPrefix("MNM_PLAY_") || key.hasPrefix("MNM_GRAPHICS_") || key == "MNM_MSYNC" || key == "MNM_TERMINAL_LOG" || key == "MTL_HUD_ENABLED" {
             environment.removeValue(forKey: key)
         }
         switch graphicsBackend {
@@ -136,7 +136,9 @@ enum WineRuntime {
         case .d3dMetal: environment["WINEPREFIX"] = paths.d3dMetalPrefix.path
         }
         environment["WINEARCH"] = "win64"
-        environment["WINEDEBUG"] = "-all"
+        let terminalLogEnabled = ProcessInfo.processInfo.environment["MNM_TERMINAL_LOG"] == "1"
+        environment["WINEDEBUG"] = terminalLogEnabled ? "+timestamp,+pid,+tid,+seh,+loaddll,+msync" : "-all"
+        if msyncEnabled { environment["WINEMSYNC"] = "1" }
         switch graphicsBackend {
         case .metal:
             environment["WINEDLLOVERRIDES"] = "mscoree,mshtml=d;dxgi,d3d11,d3d10core=b"
@@ -450,12 +452,13 @@ enum GameSession {
         guard let game = gameDirectory ?? paths.selectedGame else { throw PatcherSetupError.message("Install the game or choose its folder first.") }
         guard let credential = suppliedCredential ?? token(), isValid(credential) else { throw PatcherSetupError.message("Sign in again using Update / Log In.") }
         let graphicsBackend = GraphicsBackend.requested
+        let msyncEnabled = ProcessInfo.processInfo.environment["MNM_MSYNC"] != "0"
         let showHUD = ProcessInfo.processInfo.environment["MNM_GRAPHICS_HUD"] == "1"
         try WineRuntime.prepareGraphicsBackend(graphicsBackend, paths: paths)
         let process = Process()
         process.executableURL = wine
         process.currentDirectoryURL = game
-        process.environment = WineRuntime.environment(paths: paths, graphicsBackend: graphicsBackend, showHUD: showHUD)
+        process.environment = WineRuntime.environment(paths: paths, graphicsBackend: graphicsBackend, showHUD: showHUD, msyncEnabled: msyncEnabled)
         let graphicsAPIArgument = "-force-d3d11"
         // Put Unity's renderer switch immediately after the executable. The game
         // also parses its own --token argument, so keeping the engine flags first

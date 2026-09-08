@@ -196,6 +196,8 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     private static let kosmicKrispPerformanceHUDKey = "MnMKosmicKrispPerformanceHUD"
     private static let d3dMetalPerformanceHUDKey = "MnMD3DMetalPerformanceHUD"
     private static let gameModeKey = "MnMGameMode"
+    private static let msyncEnabledKey = "MnMMsyncEnabled"
+    private static let terminalLogKey = "MnMTerminalLog"
     private var window: NSWindow!
     private let statusLabel = NSTextField(wrappingLabelWithString: "Checking your game…")
     private let detailLabel = NSTextField(wrappingLabelWithString: "")
@@ -920,6 +922,8 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             var environment = ProcessInfo.processInfo.environment
             environment["MNM_GRAPHICS_BACKEND"] = selectedGraphicsBackend.rawValue
             environment["MNM_GRAPHICS_HUD"] = performanceHUDEnabled ? "1" : "0"
+            environment["MNM_MSYNC"] = msyncEnabled ? "1" : "0"
+            environment["MNM_TERMINAL_LOG"] = terminalLogEnabled ? "1" : "0"
             process.environment = environment
             process.standardInput = FileHandle.nullDevice
             process.standardOutput = FileHandle.nullDevice
@@ -1054,6 +1058,15 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         UserDefaults.standard.bool(forKey: Self.gameModeKey)
     }
 
+    private var msyncEnabled: Bool {
+        guard UserDefaults.standard.object(forKey: Self.msyncEnabledKey) != nil else { return true }
+        return UserDefaults.standard.bool(forKey: Self.msyncEnabledKey)
+    }
+
+    private var terminalLogEnabled: Bool {
+        UserDefaults.standard.bool(forKey: Self.terminalLogKey)
+    }
+
     private func updatePerformanceHUDButtonAppearance() {
         guard hudButton != nil else { return }
         let hudEnabled = performanceHUDEnabled
@@ -1073,15 +1086,27 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         case .kosmicKrisp: renderer = "KosmicKrisp"
         case .d3dMetal: renderer = "D3DMetal"
         }
-        let item = NSMenuItem(title: "\(renderer) Performance HUD", action: #selector(togglePerformanceHUD), keyEquivalent: "")
-        item.target = self
-        item.state = performanceHUDEnabled ? .on : .off
-        menu.addItem(item)
+        let msyncItem = NSMenuItem(title: "MSync (Recommended)", action: #selector(toggleMSync), keyEquivalent: "")
+        msyncItem.target = self
+        msyncItem.state = msyncEnabled ? .on : .off
+        menu.addItem(msyncItem)
+        menu.addItem(.separator())
         let gameModeItem = NSMenuItem(title: "Game Mode", action: #selector(toggleGameMode), keyEquivalent: "")
         gameModeItem.target = self
         gameModeItem.state = gameModeEnabled ? .on : .off
         gameModeItem.isEnabled = gameModeController.isAvailable
         menu.addItem(gameModeItem)
+        menu.addItem(.separator())
+        let item = NSMenuItem(title: "\(renderer) Performance HUD", action: #selector(togglePerformanceHUD), keyEquivalent: "")
+        item.target = self
+        item.state = performanceHUDEnabled ? .on : .off
+        menu.addItem(item)
+        menu.addItem(.separator())
+        let terminalLogItem = NSMenuItem(title: "Terminal Log", action: #selector(toggleTerminalLog), keyEquivalent: "")
+        terminalLogItem.target = self
+        terminalLogItem.state = terminalLogEnabled ? .on : .off
+        terminalLogItem.toolTip = "This will open a Terminal window to show live Wine output on the next game launch."
+        menu.addItem(terminalLogItem)
         menu.addItem(.separator())
         let noteTitle = gameModeController.isAvailable
             ? "Applies on next game launch"
@@ -1100,6 +1125,25 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
 
     @objc private func toggleGameMode() {
         UserDefaults.standard.set(!gameModeEnabled, forKey: Self.gameModeKey)
+        updatePerformanceHUDButtonAppearance()
+    }
+
+    @objc private func toggleMSync() {
+        UserDefaults.standard.set(!msyncEnabled, forKey: Self.msyncEnabledKey)
+        updatePerformanceHUDButtonAppearance()
+    }
+
+    @objc private func toggleTerminalLog() {
+        if !terminalLogEnabled {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Enable Terminal Log?"
+            alert.informativeText = "Terminal Log is intended for debugging Wine. It opens a live Terminal window and may noticeably reduce game performance while enabled."
+            alert.addButton(withTitle: "Enable")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        UserDefaults.standard.set(!terminalLogEnabled, forKey: Self.terminalLogKey)
         updatePerformanceHUDButtonAppearance()
     }
 
