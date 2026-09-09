@@ -195,6 +195,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     private static let dxvkPerformanceHUDKey = "MnMDXVKPerformanceHUD"
     private static let kosmicKrispPerformanceHUDKey = "MnMKosmicKrispPerformanceHUD"
     private static let d3dMetalPerformanceHUDKey = "MnMD3DMetalPerformanceHUD"
+    private static let metalFXUpscalingKey = "MnMMetalFXUpscaling"
     private static let gameModeKey = "MnMGameMode"
     private static let msyncEnabledKey = "MnMMsyncEnabled"
     private static let terminalLogKey = "MnMTerminalLog"
@@ -922,6 +923,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             var environment = ProcessInfo.processInfo.environment
             environment["MNM_GRAPHICS_BACKEND"] = selectedGraphicsBackend.rawValue
             environment["MNM_GRAPHICS_HUD"] = performanceHUDEnabled ? "1" : "0"
+            environment["MNM_METALFX_UPSCALING"] = metalFXUpscalingEnabled ? "1" : "0"
             environment["MNM_MSYNC"] = msyncEnabled ? "1" : "0"
             environment["MNM_TERMINAL_LOG"] = terminalLogEnabled ? "1" : "0"
             process.environment = environment
@@ -1054,6 +1056,10 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         UserDefaults.standard.bool(forKey: performanceHUDKey)
     }
 
+    private var metalFXUpscalingEnabled: Bool {
+        selectedGraphicsBackend == .metal && UserDefaults.standard.bool(forKey: Self.metalFXUpscalingKey)
+    }
+
     private var gameModeEnabled: Bool {
         UserDefaults.standard.bool(forKey: Self.gameModeKey)
     }
@@ -1071,10 +1077,15 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         guard hudButton != nil else { return }
         let hudEnabled = performanceHUDEnabled
         let gameMode = gameModeEnabled
-        hudButton.toolTip = "Performance HUD: \(hudEnabled ? "On" : "Off") • Game Mode: \(gameMode ? "On" : "Off")"
-        hudButton.contentTintColor = (hudEnabled || gameMode) ? .systemGreen : .secondaryLabelColor
+        let metalFXEnabled = metalFXUpscalingEnabled
+        let statusItems = [
+            "Performance HUD: \(hudEnabled ? "On" : "Off")",
+            "Game Mode: \(gameMode ? "On" : "Off")"
+        ] + (selectedGraphicsBackend == .metal ? ["MetalFX Upscaling: \(metalFXEnabled ? "On" : "Off")"] : [])
+        hudButton.toolTip = statusItems.joined(separator: " • ")
+        hudButton.contentTintColor = (hudEnabled || gameMode || metalFXEnabled) ? .systemGreen : .secondaryLabelColor
         hudButton.setAccessibilityLabel("Graphics, performance, and Game Mode settings")
-        hudButton.setAccessibilityValue("Performance HUD \(hudEnabled ? "on" : "off"), Game Mode \(gameMode ? "on" : "off")")
+        hudButton.setAccessibilityValue(statusItems.joined(separator: ", "))
     }
 
     @objc private func showPerformanceHUDMenu(_ sender: NSButton) {
@@ -1097,6 +1108,14 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         gameModeItem.isEnabled = gameModeController.isAvailable
         menu.addItem(gameModeItem)
         menu.addItem(.separator())
+        if selectedGraphicsBackend == .metal {
+            let metalFXItem = NSMenuItem(title: "MetalFX Upscaling", action: #selector(toggleMetalFXUpscaling), keyEquivalent: "")
+            metalFXItem.target = self
+            metalFXItem.state = metalFXUpscalingEnabled ? .on : .off
+            metalFXItem.toolTip = "Uses a true 1280 × 720 DXMT render surface, then MetalFX upscales it to 1920 × 1080 on the next launch."
+            menu.addItem(metalFXItem)
+            menu.addItem(.separator())
+        }
         let item = NSMenuItem(title: "\(renderer) Performance HUD", action: #selector(togglePerformanceHUD), keyEquivalent: "")
         item.target = self
         item.state = performanceHUDEnabled ? .on : .off
@@ -1120,6 +1139,13 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     @objc private func togglePerformanceHUD() {
         let defaults = UserDefaults.standard
         defaults.set(!performanceHUDEnabled, forKey: performanceHUDKey)
+        updatePerformanceHUDButtonAppearance()
+    }
+
+    @objc private func toggleMetalFXUpscaling() {
+        guard selectedGraphicsBackend == .metal else { return }
+        let defaults = UserDefaults.standard
+        defaults.set(!metalFXUpscalingEnabled, forKey: Self.metalFXUpscalingKey)
         updatePerformanceHUDButtonAppearance()
     }
 
@@ -1195,9 +1221,12 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             UserDefaults.standard.set(true, forKey: confirmationKey)
         }
 
-        let alreadyInstalled = backend == .dxvk || backend == .kosmicKrisp
-            ? WinePaths.current.dxvkInstalled
-            : WinePaths.current.d3dMetalInstalled
+        let alreadyInstalled: Bool
+        switch backend {
+        case .dxvk, .kosmicKrisp: alreadyInstalled = WinePaths.current.dxvkInstalled
+        case .d3dMetal: alreadyInstalled = WinePaths.current.d3dMetalInstalled
+        case .metal: alreadyInstalled = true
+        }
         if alreadyInstalled {
             UserDefaults.standard.set(backend.rawValue, forKey: Self.graphicsBackendKey)
             updatePerformanceHUDButtonAppearance()

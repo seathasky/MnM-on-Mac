@@ -124,9 +124,9 @@ enum WineRuntime {
         return "ready"
     }
 
-    static func environment(paths: WinePaths, graphicsBackend: GraphicsBackend = .metal, showHUD: Bool = false, msyncEnabled: Bool = true) -> [String: String] {
+    static func environment(paths: WinePaths, graphicsBackend: GraphicsBackend = .metal, showHUD: Bool = false, msyncEnabled: Bool = true, metalFXUpscaling: Bool = false) -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
-        for key in Array(environment.keys) where key.hasPrefix("WINE") || key.hasPrefix("CX_") || key.hasPrefix("DYLD_") || key.hasPrefix("VK_") || key.hasPrefix("MNM_PLAY_") || key.hasPrefix("MNM_GRAPHICS_") || key == "MNM_MSYNC" || key == "MNM_TERMINAL_LOG" || key == "MTL_HUD_ENABLED" {
+        for key in Array(environment.keys) where key.hasPrefix("WINE") || key.hasPrefix("CX_") || key.hasPrefix("DYLD_") || key.hasPrefix("VK_") || key.hasPrefix("DXMT_") || key.hasPrefix("MNM_PLAY_") || key.hasPrefix("MNM_GRAPHICS_") || key == "MNM_METALFX_UPSCALING" || key == "MNM_MSYNC" || key == "MNM_TERMINAL_LOG" || key == "MTL_HUD_ENABLED" {
             environment.removeValue(forKey: key)
         }
         switch graphicsBackend {
@@ -142,6 +142,10 @@ enum WineRuntime {
         switch graphicsBackend {
         case .metal:
             environment["WINEDLLOVERRIDES"] = "mscoree,mshtml=d;dxgi,d3d11,d3d10core=b"
+            if metalFXUpscaling {
+                environment["DXMT_METALFX_SPATIAL_SWAPCHAIN"] = "1"
+                environment["DXMT_CONFIG"] = "d3d11.metalSpatialUpscaleFactor=1.5;"
+            }
         case .dxvk, .kosmicKrisp:
             environment["WINEDLLOVERRIDES"] = "mscoree,mshtml=d;dxgi,d3d11,d3d10core=n"
         case .d3dMetal:
@@ -454,21 +458,22 @@ enum GameSession {
         let graphicsBackend = GraphicsBackend.requested
         let msyncEnabled = ProcessInfo.processInfo.environment["MNM_MSYNC"] != "0"
         let showHUD = ProcessInfo.processInfo.environment["MNM_GRAPHICS_HUD"] == "1"
+        let metalFXUpscaling = graphicsBackend == .metal && ProcessInfo.processInfo.environment["MNM_METALFX_UPSCALING"] == "1"
         try WineRuntime.prepareGraphicsBackend(graphicsBackend, paths: paths)
         let process = Process()
         process.executableURL = wine
         process.currentDirectoryURL = game
-        process.environment = WineRuntime.environment(paths: paths, graphicsBackend: graphicsBackend, showHUD: showHUD, msyncEnabled: msyncEnabled)
+        process.environment = WineRuntime.environment(paths: paths, graphicsBackend: graphicsBackend, showHUD: showHUD, msyncEnabled: msyncEnabled, metalFXUpscaling: metalFXUpscaling)
         let graphicsAPIArgument = "-force-d3d11"
         // Put Unity's renderer switch immediately after the executable. The game
         // also parses its own --token argument, so keeping the engine flags first
         // avoids a launcher wrapper accidentally consuming them.
-        var gameArguments = [game.appendingPathComponent("mnm.exe").path, graphicsAPIArgument]
-        gameArguments += ["--token", credential]
+        let gameArguments = [game.appendingPathComponent("mnm.exe").path, graphicsAPIArgument, "--token", credential]
         process.arguments = gameArguments
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         return process
     }
+
 }
