@@ -202,6 +202,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     private var window: NSWindow!
     private let statusLabel = NSTextField(wrappingLabelWithString: "Checking your game…")
     private let detailLabel = NSTextField(wrappingLabelWithString: "")
+    private var errorGroup: NSStackView!
     private var playButton: NSButton!
     private var updateButton: NSButton!
     private var reauthenticateButton: NSButton!
@@ -213,6 +214,8 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     private var setupInfo: NSStackView!
     private var setupInfoTitle: NSTextField!
     private var setupInfoBody: NSTextField!
+    private var errorGroupHeightConstraint: NSLayoutConstraint!
+    private var heroHeightConstraint: NSLayoutConstraint!
     private var graphicsBackendRow: NSStackView!
     private var graphicsBackendButton: NSPopUpButton!
     private var officialSectionLabel: NSTextField!
@@ -349,10 +352,13 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         detailLabel.maximumNumberOfLines = 2
         detailLabel.lineBreakMode = .byWordWrapping
         detailLabel.heightAnchor.constraint(equalToConstant: 34).isActive = true
-        let statusGroup = NSStackView(views: [statusLabel, detailLabel])
-        statusGroup.orientation = .vertical
-        statusGroup.alignment = .leading
-        statusGroup.spacing = 5
+        errorGroup = NSStackView(views: [statusLabel, detailLabel])
+        errorGroup.orientation = .vertical
+        errorGroup.alignment = .leading
+        errorGroup.spacing = 5
+        errorGroup.isHidden = true
+        errorGroupHeightConstraint = errorGroup.heightAnchor.constraint(equalToConstant: 0)
+        errorGroupHeightConstraint.isActive = true
 
         let graphicsBackendLabel = NSTextField(labelWithString: "Graphics")
         graphicsBackendLabel.font = .systemFont(ofSize: 12, weight: .medium)
@@ -531,22 +537,29 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             view.translatesAutoresizingMaskIntoConstraints = false
             footerLinks.addSubview(view)
         }
+        setupLogButton.translatesAutoresizingMaskIntoConstraints = false
+        footerLinks.addSubview(setupLogButton)
         footerLinks.widthAnchor.constraint(equalToConstant: 332).isActive = true
         footerLinks.heightAnchor.constraint(equalToConstant: 22).isActive = true
         NSLayoutConstraint.activate([
             versionButton.leadingAnchor.constraint(equalTo: footerLinks.leadingAnchor),
             versionButton.centerYAnchor.constraint(equalTo: footerLinks.centerYAnchor),
+            setupLogButton.centerXAnchor.constraint(equalTo: footerLinks.centerXAnchor),
+            setupLogButton.centerYAnchor.constraint(equalTo: footerLinks.centerYAnchor),
             footerRightLinks.trailingAnchor.constraint(equalTo: footerLinks.trailingAnchor),
             footerRightLinks.centerYAnchor.constraint(equalTo: footerLinks.centerYAnchor)
         ])
 
         let heroCard = HeroCardView()
         heroCard.translatesAutoresizingMaskIntoConstraints = false
-        // The setup state needs enough room for its three-line explanation.
-        // Keep the primary action at the same fixed Y position in every state
-        // and add the room below it so labels are never compressed or clipped.
-        heroCard.heightAnchor.constraint(equalToConstant: 286).isActive = true
-        let heroViews: [NSView] = [identity, launcherSectionLabel, statusGroup, playButton, setupInfo, fileActions, graphicsBackendRow]
+        heroCard.widthAnchor.constraint(equalToConstant: 332).isActive = true
+        heroCard.setContentHuggingPriority(.required, for: .vertical)
+        heroCard.setContentCompressionResistancePriority(.required, for: .vertical)
+        // Keep the hero compact. The error group is the only conditional content
+        // between the primary action and the file controls.
+        heroHeightConstraint = heroCard.heightAnchor.constraint(equalToConstant: 212)
+        heroHeightConstraint.isActive = true
+        let heroViews: [NSView] = [identity, errorGroup, playButton, fileActions, graphicsBackendRow]
         for view in heroViews {
             view.translatesAutoresizingMaskIntoConstraints = false
             heroCard.addSubview(view)
@@ -560,27 +573,18 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             playButton.leadingAnchor.constraint(equalTo: heroCard.leadingAnchor, constant: 16),
             playButton.topAnchor.constraint(equalTo: identity.bottomAnchor, constant: 10),
 
-            launcherSectionLabel.leadingAnchor.constraint(equalTo: heroCard.leadingAnchor, constant: 16),
-            launcherSectionLabel.trailingAnchor.constraint(lessThanOrEqualTo: heroCard.trailingAnchor, constant: -16),
-            launcherSectionLabel.topAnchor.constraint(equalTo: playButton.bottomAnchor, constant: 6),
-
-            statusGroup.leadingAnchor.constraint(equalTo: heroCard.leadingAnchor, constant: 16),
-            statusGroup.trailingAnchor.constraint(equalTo: heroCard.trailingAnchor, constant: -16),
-            statusGroup.topAnchor.constraint(equalTo: launcherSectionLabel.bottomAnchor, constant: 3),
-
-            setupInfo.leadingAnchor.constraint(equalTo: heroCard.leadingAnchor, constant: 16),
-            setupInfo.trailingAnchor.constraint(equalTo: heroCard.trailingAnchor, constant: -16),
-            setupInfo.topAnchor.constraint(equalTo: statusGroup.bottomAnchor, constant: 6),
-            setupInfo.bottomAnchor.constraint(lessThanOrEqualTo: heroCard.bottomAnchor, constant: -10),
+            errorGroup.leadingAnchor.constraint(equalTo: heroCard.leadingAnchor, constant: 16),
+            errorGroup.trailingAnchor.constraint(equalTo: heroCard.trailingAnchor, constant: -16),
+            errorGroup.topAnchor.constraint(equalTo: playButton.bottomAnchor, constant: 6),
 
             fileActions.leadingAnchor.constraint(equalTo: heroCard.leadingAnchor, constant: 16),
-            fileActions.topAnchor.constraint(equalTo: statusGroup.bottomAnchor, constant: 6),
+            fileActions.topAnchor.constraint(equalTo: errorGroup.bottomAnchor, constant: 6),
 
             graphicsBackendRow.leadingAnchor.constraint(equalTo: heroCard.leadingAnchor, constant: 16),
             graphicsBackendRow.topAnchor.constraint(equalTo: fileActions.bottomAnchor, constant: 6)
         ])
 
-        let maintenanceContent = NSStackView(views: [officialSectionLabel, accountActions, setupLogButton])
+        let maintenanceContent = NSStackView(views: [officialSectionLabel, accountActions])
         maintenanceContent.orientation = .vertical
         maintenanceContent.alignment = .leading
         maintenanceContent.spacing = 7
@@ -588,6 +592,9 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         maintenanceContent.setCustomSpacing(10, after: accountActions)
 
         maintenanceCard = MaintenanceCardView()
+        maintenanceCard.widthAnchor.constraint(equalToConstant: 332).isActive = true
+        maintenanceCard.setContentHuggingPriority(.required, for: .vertical)
+        maintenanceCard.setContentCompressionResistancePriority(.required, for: .vertical)
         maintenanceCard.translatesAutoresizingMaskIntoConstraints = false
         maintenanceContent.translatesAutoresizingMaskIntoConstraints = false
         maintenanceCard.addSubview(maintenanceContent)
@@ -598,15 +605,11 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             maintenanceContent.bottomAnchor.constraint(equalTo: maintenanceCard.bottomAnchor, constant: -12)
         ])
 
-        let spacer = NSView()
-        spacer.setContentHuggingPriority(.defaultLow, for: .vertical)
-        spacer.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
-        // Let the flexible space separate the main card from maintenance so the
-        // official-launcher card stays anchored beside the footer divider.
-        let controls = NSStackView(views: [heroCard, spacer, maintenanceCard, footerDivider, footerLinks])
+        let controls = NSStackView(views: [heroCard, maintenanceCard, footerDivider, footerLinks])
         controls.orientation = .vertical
         controls.alignment = .leading
         controls.spacing = 16
+        controls.setCustomSpacing(8, after: heroCard)
         controls.setCustomSpacing(8, after: maintenanceCard)
         controls.setCustomSpacing(8, after: footerDivider)
         controls.translatesAutoresizingMaskIntoConstraints = false
@@ -759,9 +762,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         setInitialSetupMode(false)
         if let failure = storageFailure {
             setReadyLayout(false)
-            statusLabel.stringValue = "Data folder needs attention"
-            statusLabel.textColor = .systemOrange
-            detailLabel.stringValue = failure
+            setErrorMessage(failure)
             playButton.isEnabled = false
             updateButton.isEnabled = false
             reauthenticateButton.isEnabled = false
@@ -776,6 +777,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             else { lastPatcherFailure = nil }
         }
         if gameProcess?.isRunning == true || GameRunState.isRunning(.current) {
+            setErrorMessage(nil)
             setReadyLayout(true)
             graphicsBackendRow.alphaValue = 0.45
             statusLabel.stringValue = "Game is running"
@@ -819,9 +821,9 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             playButton.title = "Show Official Launcher"
             playButton.isEnabled = true
             if let failure = lastPatcherFailure {
-                statusLabel.stringValue = "Game needs attention"
-                statusLabel.textColor = .systemOrange
-                detailLabel.stringValue = failure
+                setErrorMessage(failure)
+            } else {
+                setErrorMessage(nil)
             }
             return
         }
@@ -886,6 +888,21 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             statusLabel.stringValue = "Action needs attention"
             statusLabel.textColor = .systemOrange
             detailLabel.stringValue = failure
+        }
+        // Normal status descriptions are intentionally omitted from the hero.
+        // Only actionable failures occupy the compact error section.
+        setErrorMessage(storageFailure ?? lastPatcherFailure)
+        if !busy && lastPatcherFailure == nil {
+            switch state {
+            case "needs_wine":
+                setProgressMessage("Initial setup", detail: "First-time setup usually takes 5–10 minutes, depending on your connection.")
+            case "needs_libraries":
+                setProgressMessage("Initial setup", detail: "Installing support files usually takes a few minutes.")
+            case "needs_prefix":
+                setProgressMessage("Initial setup", detail: "One local setup step remains before you can play.")
+            default:
+                break
+            }
         }
         if focusedSetup { updateSetupInfo(for: state) }
     }
@@ -963,17 +980,15 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         reauthenticateButton.isEnabled = false
         folderButton.isEnabled = false
         setupLogButton.isHidden = true
-        statusLabel.textColor = .labelColor
-        statusLabel.stringValue = updatingRuntime ? "Updating runtime…" : "Setting up Wine…"
-        detailLabel.stringValue = updatingRuntime
+        let setupEstimate = updatingRuntime
             ? "Updating support files. Your existing Windows environments and game data will not be changed."
             : "First-time setup usually takes 5–10 minutes, depending on your connection."
+        setProgressMessage(updatingRuntime ? "Updating runtime…" : "Setting up Wine…", detail: setupEstimate)
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 try WineInstaller(paths: .current).install { message in
                     DispatchQueue.main.async {
-                        self.statusLabel.stringValue = message
-                        self.updateSetupInfo(forProgress: message)
+                        self.setProgressMessage(message, detail: setupEstimate)
                     }
                 }
                 DispatchQueue.main.async {
@@ -1020,9 +1035,9 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     }
 
     private func setInitialSetupMode(_ active: Bool) {
-        launcherSectionLabel.stringValue = state == "needs_runtime_update" ? "Runtime Update" : "Initial Setup"
-        launcherSectionLabel.isHidden = !active
-        setupInfo.isHidden = !active
+        // Setup explanations are intentionally not shown in the hero card.
+        launcherSectionLabel.isHidden = true
+        setupInfo.isHidden = true
         fileActions.isHidden = active
         if active { setReadyLayout(false) }
         sectionDivider.isHidden = active
@@ -1034,6 +1049,48 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     private func setReadyLayout(_ active: Bool) {
         graphicsBackendRow.isHidden = !active
         graphicsBackendRow.alphaValue = 1
+    }
+
+    private func setErrorMessage(_ message: String?) {
+        guard let message, !message.isEmpty else {
+            errorGroup.isHidden = true
+            errorGroupHeightConstraint.constant = 0
+            detailLabel.isHidden = true
+            heroHeightConstraint.constant = fileActions.isHidden ? 150 : 212
+            return
+        }
+        let combined = "Action needs attention — \(message)"
+        statusLabel.stringValue = combined
+        statusLabel.font = fittingErrorFont(for: combined, width: 300)
+        statusLabel.textColor = .systemOrange
+        detailLabel.stringValue = ""
+        statusLabel.maximumNumberOfLines = 1
+        statusLabel.cell?.usesSingleLineMode = true
+        statusLabel.cell?.wraps = false
+        detailLabel.isHidden = true
+        errorGroup.isHidden = false
+        errorGroupHeightConstraint.constant = 24
+        heroHeightConstraint.constant = 212
+    }
+
+    private func fittingErrorFont(for text: String, width: CGFloat) -> NSFont {
+        for size in stride(from: 12.0, through: 7.0, by: -0.5) {
+            let font = NSFont.systemFont(ofSize: size, weight: .semibold)
+            if (text as NSString).size(withAttributes: [.font: font]).width <= width { return font }
+        }
+        return NSFont.systemFont(ofSize: 7, weight: .semibold)
+    }
+
+    private func setProgressMessage(_ title: String, detail: String = "") {
+        statusLabel.stringValue = title
+        statusLabel.font = .systemFont(ofSize: 15, weight: .medium)
+        statusLabel.textColor = .labelColor
+        detailLabel.stringValue = detail
+        statusLabel.isHidden = false
+        detailLabel.isHidden = detail.isEmpty
+        errorGroup.isHidden = false
+        errorGroupHeightConstraint.constant = detail.isEmpty ? 30 : 58
+        heroHeightConstraint.constant = 200
     }
 
     private var selectedGraphicsBackend: GraphicsBackend {
@@ -1246,8 +1303,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         case .d3dMetal: displayName = "D3DMetal"
         case .metal: displayName = "DXMT"
         }
-        statusLabel.stringValue = "Installing \(displayName)…"
-        statusLabel.textColor = .labelColor
+        setProgressMessage("Installing \(displayName)…")
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let report: (String) -> Void = { message in
@@ -1328,8 +1384,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         let otherPatchers = NSRunningApplication.runningApplications(withBundleIdentifier: "com.monstersandmemories.mnm-patcher-app")
             .filter { !$0.isTerminated }
         if !otherPatchers.isEmpty {
-            statusLabel.stringValue = "Close the other MnM patcher first"
-            detailLabel.stringValue = "Close its window, then click Update / Log In again."
+            setErrorMessage("Close the other MnM patcher, then try again.")
             otherPatchers.first?.activate(options: [])
             return
         }
