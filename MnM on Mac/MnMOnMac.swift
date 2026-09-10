@@ -10,10 +10,21 @@ import AppKit
 private struct GitHubRelease: Decodable {
     let tagName: String
     let htmlURL: URL
+    let assets: [GitHubAsset]
 
     enum CodingKeys: String, CodingKey {
         case tagName = "tag_name"
         case htmlURL = "html_url"
+        case assets
+    }
+}
+
+private struct GitHubAsset: Decodable {
+    let name: String
+    let browserDownloadURL: URL
+    enum CodingKeys: String, CodingKey {
+        case name
+        case browserDownloadURL = "browser_download_url"
     }
 }
 
@@ -225,6 +236,8 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     private var versionButton: NSButton!
     private var hudButton: NSButton!
     private var availableReleaseURL: URL?
+    private var availableAssetURL: URL?
+    private var updatePromptShown = false
     private var state = ""
     private var busy = false
     private var patcherProcess: Process?
@@ -740,6 +753,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
                       release.htmlURL.host == "github.com",
                       self.isNewerVersion(release.tagName, than: currentVersion) else { return }
                 let version = release.tagName.lowercased().hasPrefix("v") ? String(release.tagName.dropFirst()) : release.tagName
+                self.availableAssetURL = release.assets.first(where: { $0.name.lowercased().hasSuffix(".zip") })?.browserDownloadURL
                 self.availableReleaseURL = release.htmlURL
                 self.versionButton.target = self
                 self.versionButton.action = #selector(self.openAvailableRelease)
@@ -749,8 +763,77 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
                                  .foregroundColor: NSColor.systemGreen,
                                  .underlineStyle: NSUnderlineStyle.single.rawValue])
                 self.versionButton.setAccessibilityLabel("MnM on Mac update \(version) available")
+                self.showUpdatePrompt(version: version)
             }
         }.resume()
+    }
+
+    private func showUpdatePrompt(version: String) {
+        guard !updatePromptShown, availableAssetURL != nil else { return }
+        updatePromptShown = true
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Update Available"
+        alert.informativeText = "MnM on Mac \(version) is ready to install. The app will close briefly, replace the current version, and reopen automatically."
+        alert.addButton(withTitle: "Install Update")
+        alert.addButton(withTitle: "Later")
+        if alert.runModal() == .alertFirstButtonReturn { installAvailableUpdate() }
+    }
+
+    private func installAvailableUpdate() {
+        guard let assetURL = availableAssetURL else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Downloading Update…"
+        alert.informativeText = "Please keep MnM on Mac open while the update downloads."
+        alert.addButton(withTitle: "Cancel")
+        let task = URLSession.shared.downloadTask(with: assetURL) { [weak self] location, _, error in
+            DispatchQueue.main.async {
+                alert.window.orderOut(nil)
+                guard let self, let location, error == nil else { return }
+                self.finishInstallingUpdate(from: location)
+            }
+        }
+        task.resume()
+        alert.beginSheetModal(for: window)
+    }
+
+    private func finishInstallingUpdate(from archive: URL) {
+        let appURL = Bundle.main.bundleURL
+        let destination = appURL.deletingLastPathComponent()
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let scriptURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("mnm-update-\(pid).sh")
+        func quote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+        let script = """
+        #!/bin/sh
+        archive=\(quote(archive.path))
+        destination=\(quote(destination.path))
+        app=\(quote(appURL.path))
+        work=\"$TMPDIR/mnm-update-\(pid)\"
+        mkdir -p \"$work\"
+        ditto -x -k \"$archive\" \"$work\"
+        newapp=\"$(find \"$work\" -maxdepth 2 -name '*.app' -type d | head -1)\"
+        if [ -z \"$newapp\" ]; then exit 1; fi
+        while kill -0 \(pid) 2>/dev/null; do sleep 1; done
+        rm -rf \"$app\"
+        ditto \"$newapp\" \"$app\"
+        open \"$app\"
+        rm -f \(quote(scriptURL.path))
+        """
+        do {
+            try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/sh")
+            process.arguments = [scriptURL.path]
+            try process.run()
+            NSApp.terminate(nil)
+        } catch {
+            let failure = NSAlert()
+            failure.messageText = "Update Failed"
+            failure.informativeText = error.localizedDescription
+            failure.runModal()
+        }
     }
 
     @objc private func openAvailableRelease() {
