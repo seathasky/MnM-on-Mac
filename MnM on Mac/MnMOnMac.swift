@@ -61,16 +61,20 @@ final class PrimaryActionCell: NSButtonCell {
 }
 
 final class GhostActionCell: NSButtonCell {
-    private let tintColor: NSColor
+    private var tintColor: NSColor
 
-    init(textCell: String, tintColor: NSColor = .labelColor) {
+    init(textCell: String, tintColor: NSColor = .secondaryLabelColor) {
         self.tintColor = tintColor
         super.init(textCell: textCell)
     }
 
     required init(coder: NSCoder) {
-        tintColor = .labelColor
+        tintColor = .secondaryLabelColor
         super.init(coder: coder)
+    }
+
+    func setTintColor(_ color: NSColor) {
+        tintColor = color
     }
 
     override var isHighlighted: Bool {
@@ -91,7 +95,7 @@ final class GhostActionCell: NSButtonCell {
         let styled = NSMutableAttributedString(attributedString: title)
         styled.addAttributes([
             .font: NSFont.systemFont(ofSize: 13, weight: .medium),
-            .foregroundColor: NSColor.secondaryLabelColor
+            .foregroundColor: tintColor
         ], range: NSRange(location: 0, length: styled.length))
         return super.drawTitle(styled, withFrame: frame, in: controlView)
     }
@@ -245,6 +249,9 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     private var patcherReadyChecks = 0
     private var expectedPatcherTermination = false
     private var lastPatcherFailure: String?
+    private var repairAttentionTimer: Timer?
+    private var repairAttentionActive = false
+    private var repairAttentionOn = false
     private var gameProcess: Process?
     private var storageFailure: String?
     private var refreshTimer: Timer?
@@ -590,10 +597,12 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
 
             errorGroup.leadingAnchor.constraint(equalTo: heroCard.leadingAnchor, constant: 16),
             errorGroup.trailingAnchor.constraint(equalTo: heroCard.trailingAnchor, constant: -16),
-            errorGroup.topAnchor.constraint(equalTo: playButton.bottomAnchor, constant: 6),
+            // Errors use the small gap below Play and must never participate in
+            // positioning the controls below them.
+            errorGroup.topAnchor.constraint(equalTo: playButton.bottomAnchor, constant: 1),
 
             fileActions.leadingAnchor.constraint(equalTo: heroCard.leadingAnchor, constant: 16),
-            fileActions.topAnchor.constraint(equalTo: errorGroup.bottomAnchor, constant: 6),
+            fileActions.topAnchor.constraint(equalTo: playButton.bottomAnchor, constant: 12),
 
             graphicsBackendRow.leadingAnchor.constraint(equalTo: heroCard.leadingAnchor, constant: 16),
             graphicsBackendRow.topAnchor.constraint(equalTo: fileActions.bottomAnchor, constant: 6)
@@ -858,7 +867,17 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         folderButton.isEnabled = gameProcess?.isRunning != true && patcherProcess?.isRunning != true
         if let result = GameRunState.read(.current), result.updated > lastGameStatusUpdate {
             lastGameStatusUpdate = result.updated
-            if result.state == "failed" { lastPatcherFailure = result.message }
+            if result.state == "failed" {
+                // Upgrade failure state written by older builds so a relaunch
+                // immediately shows the actionable repair guidance.
+                let normalizedFailure = result.message.lowercased()
+                if result.message == "The game stopped (code 53)."
+                    || normalizedFailure.contains("game files need repair") {
+                    lastPatcherFailure = gameFailureMessage(for: 53)
+                } else {
+                    lastPatcherFailure = result.message
+                }
+            }
             else { lastPatcherFailure = nil }
         }
         if gameProcess?.isRunning == true || GameRunState.isRunning(.current) {
@@ -928,6 +947,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         hudButton.isEnabled = true
         updateButton.isHidden = false
         updateButton.title = "Install / Update / Login"
+        setRepairButtonAttention(false)
         statusLabel.textColor = .labelColor
         switch state {
         case "ready":
@@ -974,6 +994,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             statusLabel.textColor = .systemOrange
             detailLabel.stringValue = failure
         }
+        setRepairButtonAttention(lastPatcherFailure?.localizedCaseInsensitiveContains("Install + Repair") == true)
         // Normal status descriptions are intentionally omitted from the hero.
         // Only actionable failures occupy the compact error section.
         setErrorMessage(storageFailure ?? lastPatcherFailure)
@@ -1042,7 +1063,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
                     self.gameProcess = nil
                     self.gameModeController.deactivate()
                     if finished.terminationStatus != 0 {
-                        self.lastPatcherFailure = "The game stopped (code \(finished.terminationStatus)). This Wine build is experimental."
+                        self.lastPatcherFailure = self.gameFailureMessage(for: finished.terminationStatus)
                     }
                     self.refresh()
                 }
@@ -1180,7 +1201,9 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         statusLabel.maximumNumberOfLines = 1
         statusLabel.cell?.usesSingleLineMode = true
         statusLabel.cell?.wraps = false
-        errorGroupHeightConstraint.constant = 24
+        // Keep the ready controls pinned in place. The single-line error is an
+        // overlay in the existing gap instead of another row in the layout.
+        errorGroupHeightConstraint.constant = 11
         statusLabel.isHidden = false
         detailLabel.isHidden = true
         errorGroup.isHidden = false
@@ -1188,11 +1211,44 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     }
 
     private func fittingErrorFont(for text: String, width: CGFloat) -> NSFont {
-        for size in stride(from: 12.0, through: 7.0, by: -0.5) {
+        for size in stride(from: 9.0, through: 7.0, by: -0.5) {
             let font = NSFont.systemFont(ofSize: size, weight: .semibold)
             if (text as NSString).size(withAttributes: [.font: font]).width <= width { return font }
         }
         return NSFont.systemFont(ofSize: 7, weight: .semibold)
+    }
+
+    private func gameFailureMessage(for status: Int32) -> String {
+        // Code 53 is the known post-update Unity load failure. The file may be
+        // present but mismatched, so existence checks cannot diagnose it.
+        if status == 53 {
+            return "Use Official Launcher's Install + Repair."
+        }
+        return "The game stopped (code \(status)). Open Setup Log for details."
+    }
+
+    private func setRepairButtonAttention(_ active: Bool) {
+        guard active != repairAttentionActive else { return }
+        repairAttentionActive = active
+        repairAttentionTimer?.invalidate()
+        repairAttentionTimer = nil
+        guard let cell = updateButton?.cell as? GhostActionCell else { return }
+        if !active {
+            updateButton.title = "Install / Update / Login"
+            cell.setTintColor(.secondaryLabelColor)
+            updateButton.needsDisplay = true
+            return
+        }
+        updateButton.title = "Install + Repair"
+        repairAttentionOn = false
+        let flash: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.repairAttentionOn.toggle()
+            cell.setTintColor(self.repairAttentionOn ? .systemRed : .white)
+            self.updateButton.needsDisplay = true
+        }
+        flash()
+        repairAttentionTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in flash() }
     }
 
     private func setProgressMessage(_ title: String, detail: String = "") {

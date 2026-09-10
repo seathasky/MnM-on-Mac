@@ -55,8 +55,14 @@ enum GameBridge {
             try? logHandle?.write(contentsOf: Data("\n[Terminal Log ended \(Date())]\n".utf8))
             try? logHandle?.close()
             let code = process.terminationStatus
+            let failureMessage: String
+            if code == 53 {
+                failureMessage = "Use Official Launcher's Install + Repair."
+            } else {
+                failureMessage = "The game stopped (code \(code))."
+            }
             GameRunState.write(code == 0 ? "finished" : "failed",
-                               message: code == 0 ? "Game closed" : "The game stopped (code \(code)).", paths: paths)
+                               message: code == 0 ? "Game closed" : failureMessage, paths: paths)
         } catch {
             GameRunState.write("failed", message: error.localizedDescription, paths: paths)
         }

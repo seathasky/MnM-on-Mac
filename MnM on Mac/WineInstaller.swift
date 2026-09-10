@@ -78,6 +78,16 @@ struct D3DMetalInstaller {
         try RuntimeDownload(destination: archive, label: "D3DMetal", progress: progress).fetch(RuntimeAsset.libraries.url)
         progress("Verifying D3DMetal…")
         try WineInstaller.verify(archive, digest: RuntimeAsset.libraries.sha256)
+        try install(archive: archive, progress: progress)
+    }
+
+    func install(archive: URL, progress: @escaping (String) -> Void) throws {
+        if paths.d3dMetalInstalled { return }
+        let manager = FileManager.default
+        let stage = paths.runtime.appendingPathComponent(".d3dmetal-extract-\(UUID().uuidString)", isDirectory: true)
+        try manager.createDirectory(at: stage, withIntermediateDirectories: false)
+        defer { try? manager.removeItem(at: stage) }
+        progress("Installing D3DMetal…")
 
         let names = try NativePatcherInstaller.command("/usr/bin/tar", ["-tf", archive.path]).split(separator: "\n").map(String.init)
         let suffix = ".app/Contents/Frameworks/renderer/d3dmetal/"
@@ -218,6 +228,10 @@ struct WineInstaller {
             try fetch(asset, archive)
             progress("Installing Wine support libraries…")
             try installLibraries(archive)
+            // The support archive also contains the recommended D3DMetal
+            // graphics layer. Install it during first-time setup so Play is
+            // ready immediately instead of requiring a second download.
+            try D3DMetalInstaller(paths: paths).install(archive: archive, progress: progress)
         }
         try WineRuntime.initialize(paths: paths, progress: progress)
     }
