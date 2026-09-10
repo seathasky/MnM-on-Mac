@@ -9,29 +9,55 @@
 import Foundation
 
 final class GameModeController {
+    private let toolURL: URL?
     let isAvailable: Bool
     private(set) var isActive = false
 
     init() {
-        isAvailable = Self.runXcrun(["-f", "gamepolicyctl"])
+        toolURL = Self.findTool()
+        isAvailable = toolURL != nil
     }
 
     func activate() -> Bool {
         guard isAvailable else { return false }
         if isActive { return true }
-        isActive = Self.runXcrun(["gamepolicyctl", "game-mode", "set", "on"])
+        isActive = Self.run(arguments: ["game-mode", "set", "on"], using: toolURL)
         return isActive
     }
 
     func deactivate() {
         guard isAvailable, isActive else { return }
-        _ = Self.runXcrun(["gamepolicyctl", "game-mode", "set", "auto"])
+        _ = Self.run(arguments: ["game-mode", "set", "auto"], using: toolURL)
         isActive = false
     }
 
-    private static func runXcrun(_ arguments: [String]) -> Bool {
+    private static func findTool() -> URL? {
+        let fullXcodeTool = URL(fileURLWithPath: "/Applications/Xcode.app/Contents/Developer/usr/bin/gamepolicyctl")
+        if FileManager.default.isExecutableFile(atPath: fullXcodeTool.path) { return fullXcodeTool }
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        process.arguments = ["-f", "gamepolicyctl"]
+        let output = Pipe()
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return nil }
+            let path = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let path, FileManager.default.isExecutableFile(atPath: path) else { return nil }
+            return URL(fileURLWithPath: path)
+        } catch {
+            return nil
+        }
+    }
+
+    private static func run(arguments: [String], using toolURL: URL?) -> Bool {
+        guard let toolURL else { return false }
+        let process = Process()
+        process.executableURL = toolURL
         process.arguments = arguments
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice

@@ -369,6 +369,8 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         errorGroup.orientation = .vertical
         errorGroup.alignment = .leading
         errorGroup.spacing = 5
+        statusLabel.isHidden = true
+        detailLabel.isHidden = true
         errorGroup.isHidden = true
         errorGroupHeightConstraint = errorGroup.heightAnchor.constraint(equalToConstant: 0)
         errorGroupHeightConstraint.isActive = true
@@ -1000,6 +1002,10 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         default: break
         }
         guard state == "ready", gameProcess?.isRunning != true, patcherProcess?.isRunning != true else { return }
+        if gameModeEnabled && !gameModeController.isAvailable {
+            showGameModeRequirement()
+            return
+        }
         if ((selectedGraphicsBackend == .dxvk || selectedGraphicsBackend == .kosmicKrisp) && !WinePaths.current.dxvkInstalled) ||
            (selectedGraphicsBackend == .d3dMetal && !WinePaths.current.d3dMetalInstalled) {
             graphicsBackendChanged()
@@ -1012,7 +1018,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         do {
             lastPatcherFailure = nil
             if gameModeEnabled && !gameModeController.activate() {
-                throw PatcherSetupError.message("Game Mode could not be enabled. Install Xcode Command Line Tools or turn Game Mode off in the cogwheel menu.")
+                throw PatcherSetupError.message("Game Mode could not be enabled. MnM checked the available macOS Game Mode tool, but activation was rejected. Turn Game Mode off in the cogwheel menu to continue.")
             }
             guard let bridge = Bundle.main.url(forResource: "MnMGameBridge", withExtension: nil) else {
                 throw PatcherSetupError.message("The game launch helper is missing from this app.")
@@ -1049,6 +1055,29 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             lastPatcherFailure = error.localizedDescription
         }
         refresh()
+    }
+
+    private func showGameModeRequirement() {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Full Xcode Required for Game Mode"
+        alert.informativeText = "Game Mode requires Apple’s full Xcode app. Would you like to download Xcode now?"
+        alert.addButton(withTitle: "Yes, Download Xcode")
+        alert.addButton(withTitle: "Turn Game Mode Off")
+        if alert.runModal() == .alertFirstButtonReturn {
+            let next = NSAlert()
+            next.alertStyle = .warning
+            next.messageText = "Restart MnM on Mac After Installing Xcode"
+            next.informativeText = "Download Xcode from the App Store, open it once, and accept its license if prompted. Then quit and restart MnM on Mac so Game Mode can use it."
+            next.addButton(withTitle: "Open Xcode in App Store")
+            next.addButton(withTitle: "Close")
+            if next.runModal() == .alertFirstButtonReturn {
+                NSWorkspace.shared.open(URL(string: "macappstore://itunes.apple.com/app/id497799835")!)
+            }
+        } else {
+            UserDefaults.standard.set(false, forKey: Self.gameModeKey)
+            updatePerformanceHUDButtonAppearance()
+        }
     }
 
     @objc private func setupWine() {
@@ -1136,9 +1165,10 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
 
     private func setErrorMessage(_ message: String?) {
         guard let message, !message.isEmpty else {
+            statusLabel.isHidden = true
+            detailLabel.isHidden = true
             errorGroup.isHidden = true
             errorGroupHeightConstraint.constant = 0
-            detailLabel.isHidden = true
             heroHeightConstraint.constant = fileActions.isHidden ? 150 : 212
             return
         }
@@ -1150,9 +1180,10 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         statusLabel.maximumNumberOfLines = 1
         statusLabel.cell?.usesSingleLineMode = true
         statusLabel.cell?.wraps = false
+        errorGroupHeightConstraint.constant = 24
+        statusLabel.isHidden = false
         detailLabel.isHidden = true
         errorGroup.isHidden = false
-        errorGroupHeightConstraint.constant = 24
         heroHeightConstraint.constant = 212
     }
 
@@ -1169,10 +1200,10 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         statusLabel.font = .systemFont(ofSize: 15, weight: .medium)
         statusLabel.textColor = .labelColor
         detailLabel.stringValue = detail
+        errorGroupHeightConstraint.constant = detail.isEmpty ? 30 : 58
         statusLabel.isHidden = false
         detailLabel.isHidden = detail.isEmpty
         errorGroup.isHidden = false
-        errorGroupHeightConstraint.constant = detail.isEmpty ? 30 : 58
         heroHeightConstraint.constant = 200
     }
 
