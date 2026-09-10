@@ -16,7 +16,8 @@ The app prepares a self-contained Windows environment using Wine, so no separate
 - Access to the official launcher for login, updates, and repairs
 - Custom game-folder selection
 - Graphics Engine selection including D3DMetal, DXMT and DXVK.
-- Option to enable MacOS Game Mode.
+- MetalFX Upscaling.
+- MacOS Game Mode.
 - Developer ID signed and notarized by Apple
 
 ## Installation
