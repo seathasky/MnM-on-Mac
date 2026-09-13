@@ -212,6 +212,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     private static let d3dMetalPerformanceHUDKey = "MnMD3DMetalPerformanceHUD"
     private static let metalFXUpscalingKey = "MnMMetalFXUpscaling"
     private static let gameModeKey = "MnMGameMode"
+    private static let devDiscordURL = URL(string: "https://discord.gg/9w6ZdaksDX")!
     private static let msyncEnabledKey = "MnMMsyncEnabled"
     private static let terminalLogKey = "MnMTerminalLog"
     private var window: NSWindow!
@@ -364,6 +365,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
 
         statusLabel.font = .systemFont(ofSize: 15, weight: .medium)
         statusLabel.alignment = .left
+        statusLabel.widthAnchor.constraint(equalToConstant: 300).isActive = true
         detailLabel.font = .systemFont(ofSize: 13)
         detailLabel.textColor = .secondaryLabelColor
         detailLabel.alignment = .left
@@ -650,14 +652,29 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         panelDivider.translatesAutoresizingMaskIntoConstraints = false
         controlsPanel.addSubview(panelDivider)
 
-        let updatesLink = NSButton(title: "Official Updates ↗", target: self, action: #selector(openUpdatesWebsite))
+        let updatesLink = NSButton(title: "Official Game Updates ↗", target: self, action: #selector(openUpdatesWebsite))
         updatesLink.isBordered = false
         updatesLink.attributedTitle = NSAttributedString(
-            string: "Official Updates ↗",
+            string: "Official Game Updates ↗",
             attributes: [.font: NSFont.systemFont(ofSize: 11, weight: .medium),
                          .foregroundColor: Self.accentColor,
                          .underlineStyle: NSUnderlineStyle.single.rawValue])
         updatesLink.translatesAutoresizingMaskIntoConstraints = false
+
+        let discordColor = NSColor(calibratedRed: 0.345, green: 0.396, blue: 0.949, alpha: 1)
+        let discordLink = NSButton(title: "Seathasky Dev Discord", target: self, action: #selector(openDevDiscord))
+        discordLink.isBordered = false
+        discordLink.image = NSImage(systemSymbolName: "bubble.left.and.bubble.right.fill", accessibilityDescription: "Discord")
+        discordLink.imagePosition = .imageLeading
+        discordLink.imageScaling = .scaleProportionallyDown
+        discordLink.contentTintColor = discordColor
+        discordLink.attributedTitle = NSAttributedString(
+            string: "Seathasky Dev Discord",
+            attributes: [.font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                         .foregroundColor: discordColor,
+                         .underlineStyle: NSUnderlineStyle.single.rawValue])
+        discordLink.setAccessibilityLabel("Seathasky Dev Discord")
+        discordLink.translatesAutoresizingMaskIntoConstraints = false
 
         let backgroundImage = NSImage(contentsOf: Bundle.main.url(forResource: "GelatenousCube", withExtension: "png")!)!
         let backgroundImageView = CoverImageView(image: backgroundImage)
@@ -669,6 +686,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         websitePanel.translatesAutoresizingMaskIntoConstraints = false
         websitePanel.addSubview(backgroundImageView)
         websitePanel.addSubview(updatesLink)
+        websitePanel.addSubview(discordLink)
 
         guard let contentView = window.contentView else { return }
         contentView.addSubview(websitePanel)
@@ -697,6 +715,8 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
 
             updatesLink.leadingAnchor.constraint(equalTo: websitePanel.leadingAnchor, constant: 16),
             updatesLink.bottomAnchor.constraint(equalTo: websitePanel.bottomAnchor, constant: -12),
+            discordLink.trailingAnchor.constraint(equalTo: websitePanel.trailingAnchor, constant: -16),
+            discordLink.bottomAnchor.constraint(equalTo: websitePanel.bottomAnchor, constant: -12),
 
             controls.leadingAnchor.constraint(equalTo: controlsPanel.leadingAnchor, constant: 25),
             controls.trailingAnchor.constraint(equalTo: controlsPanel.trailingAnchor, constant: -25),
@@ -707,6 +727,10 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
 
     @objc private func openUpdatesWebsite() {
         NSWorkspace.shared.open(Self.updatesURL)
+    }
+
+    @objc private func openDevDiscord() {
+        NSWorkspace.shared.open(Self.devDiscordURL)
     }
 
     private func installedAppVersion() -> String {
@@ -1185,6 +1209,8 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     }
 
     private func setErrorMessage(_ message: String?) {
+        statusLabel.alignment = .left
+        detailLabel.alignment = .left
         guard let message, !message.isEmpty else {
             statusLabel.isHidden = true
             detailLabel.isHidden = true
@@ -1252,15 +1278,26 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     }
 
     private func setProgressMessage(_ title: String, detail: String = "") {
+        statusLabel.alignment = .center
+        detailLabel.alignment = .center
+        // Progress occupies the controls area while installing. Keep the card's
+        // existing height and restore the controls through refresh on completion.
+        fileActions.isHidden = true
+        setReadyLayout(false)
+        statusLabel.maximumNumberOfLines = 2
+        statusLabel.cell?.usesSingleLineMode = false
+        statusLabel.cell?.wraps = true
+        statusLabel.lineBreakMode = .byWordWrapping
+        statusLabel.preferredMaxLayoutWidth = 300
         statusLabel.stringValue = title
         statusLabel.font = .systemFont(ofSize: 15, weight: .medium)
         statusLabel.textColor = .labelColor
         detailLabel.stringValue = detail
-        errorGroupHeightConstraint.constant = detail.isEmpty ? 30 : 58
+        errorGroupHeightConstraint.constant = 70
         statusLabel.isHidden = false
         detailLabel.isHidden = detail.isEmpty
         errorGroup.isHidden = false
-        heroHeightConstraint.constant = 200
+        heroHeightConstraint.constant = max(200, heroHeightConstraint.constant)
     }
 
     private var selectedGraphicsBackend: GraphicsBackend {
@@ -1477,7 +1514,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let report: (String) -> Void = { message in
-                    DispatchQueue.main.async { self.statusLabel.stringValue = message }
+                    DispatchQueue.main.async { self.setProgressMessage(message) }
                 }
                 if backend == .dxvk || backend == .kosmicKrisp {
                     try DXVKInstaller(paths: .current).install(progress: report)
