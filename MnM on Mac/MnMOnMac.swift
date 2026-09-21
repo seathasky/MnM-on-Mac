@@ -1468,11 +1468,11 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
                 alert.addButton(withTitle: "Install & Use DXVK")
             } else if backend == .kosmicKrisp {
                 alert.messageText = "Use Experimental KosmicKrisp?"
-                alert.informativeText = "KosmicKrisp runs DXVK through a new Vulkan-on-Metal driver included with Sikarugir 1.0.15. It uses a separate Windows environment and may have compatibility, performance, or visual issues. D3DMetal remains the recommended option."
+                alert.informativeText = "KosmicKrisp runs DXVK through a new Vulkan-on-Metal driver included with Sikarugir 1.0.18. It uses a separate Windows environment and may have compatibility, performance, or visual issues. D3DMetal remains the recommended option."
                 alert.addButton(withTitle: "Install & Use KosmicKrisp")
             } else {
                 alert.messageText = "Use D3DMetal?"
-                alert.informativeText = "D3DMetal 3.0 is Apple’s Game Porting Toolkit graphics layer. It is licensed for non-commercial development, testing, and evaluation on Apple hardware. MnM on Mac will download it from the Sikarugir 1.0.15 support package and use a separate Windows environment. Review Apple’s license in About before continuing."
+                alert.informativeText = "D3DMetal 3.0 is Apple’s Game Porting Toolkit graphics layer. It is licensed for non-commercial development, testing, and evaluation on Apple hardware. MnM on Mac will download it from the Sikarugir 1.0.18 support package and use a separate Windows environment. Review Apple’s license in About before continuing."
                 alert.addButton(withTitle: "I Agree & Install")
             }
             alert.addButton(withTitle: "Cancel")
@@ -1874,8 +1874,8 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         credit("KosmicKrisp", detail: "Mesa and KosmicKrisp contributors — the experimental Vulkan-on-Metal driver supplied by Sikarugir.",
                sourceTitle: "Source", source: "https://github.com/Kenji-NX/mesa/tree/main/src/kosmickrisp",
                licenseTitle: "MIT License", license: "https://github.com/Kenji-NX/mesa/blob/main/docs/license.rst")
-        credit("D3DMetal 3.0", detail: "Apple — the Game Porting Toolkit graphics layer, supplied through the Sikarugir 1.0.15 support package for testing.",
-               sourceTitle: "Sikarugir Package", source: "https://github.com/Sikarugir-App/Wrapper/releases/tag/v1.0",
+        credit("D3DMetal 3.0", detail: "Apple — the Game Porting Toolkit graphics layer, supplied through the Sikarugir 1.0.18 support package for testing.",
+               sourceTitle: "Sikarugir Package", source: "https://github.com/Sikarugir-App/Template/releases/tag/v1.0",
                licenseTitle: "Apple GPTK", license: "https://developer.apple.com/games/game-porting-toolkit/")
         credit("MacGamingFix", detail: "evertjr — reference implementation for the optional macOS Game Mode control.",
                sourceTitle: "Source", source: "https://github.com/evertjr/MacGamingFix",

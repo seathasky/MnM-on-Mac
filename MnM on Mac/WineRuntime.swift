@@ -84,10 +84,9 @@ struct WinePaths {
             "external/libd3dshared.dylib",
             "external/D3DMetal.framework/Versions/A/D3DMetal"
         ]
-        let compatibleVersions = ["d3dmetal-3.0-template-1.0.11", "d3dmetal-3.0-template-1.0.15"]
         let installedVersion = try? String(contentsOf: d3dMetal.appendingPathComponent("version.txt"), encoding: .utf8)
         return required.allSatisfy { FileManager.default.fileExists(atPath: d3dMetal.appendingPathComponent($0).path) } &&
-        installedVersion.map(compatibleVersions.contains) == true
+        installedVersion == WineRuntime.d3dMetalVersion
     }
     var installed: Bool { engineInstalled && librariesInstalled }
     var initialized: Bool {
@@ -109,7 +108,8 @@ struct WinePaths {
 enum WineRuntime {
     static let bundleIdentifier = "local.mnm.wine.desktop-launcher"
     static let version = "sikarugir-10.0_6-dxmt-0.80"
-    static let supportVersion = "Template-1.0.15"
+    static let supportVersion = "Template-1.0.18"
+    static let d3dMetalVersion = "d3dmetal-3.0-template-1.0.18"
     static var rosettaAvailable: Bool { FileManager.default.fileExists(atPath: "/Library/Apple/usr/share/rosetta/rosetta") }
     static var readiness: String {
         let paths = WinePaths.current
@@ -126,7 +126,7 @@ enum WineRuntime {
 
     static func environment(paths: WinePaths, graphicsBackend: GraphicsBackend = .metal, showHUD: Bool = false, msyncEnabled: Bool = true, metalFXUpscaling: Bool = false) -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
-        for key in Array(environment.keys) where key.hasPrefix("WINE") || key.hasPrefix("CX_") || key.hasPrefix("DYLD_") || key.hasPrefix("VK_") || key.hasPrefix("DXMT_") || key.hasPrefix("MNM_PLAY_") || key.hasPrefix("MNM_GRAPHICS_") || key == "MNM_METALFX_UPSCALING" || key == "MNM_MSYNC" || key == "MNM_TERMINAL_LOG" || key == "MTL_HUD_ENABLED" {
+        for key in Array(environment.keys) where key.hasPrefix("WINE") || key.hasPrefix("CX_") || key.hasPrefix("DYLD_") || key.hasPrefix("VK_") || key.hasPrefix("DXMT_") || key.hasPrefix("MTL_") || key.hasPrefix("METAL_") || key.hasPrefix("MNM_PLAY_") || key.hasPrefix("MNM_GRAPHICS_") || key == "MNM_METALFX_UPSCALING" || key == "MNM_MSYNC" || key == "MNM_TERMINAL_LOG" {
             environment.removeValue(forKey: key)
         }
         switch graphicsBackend {
@@ -288,16 +288,12 @@ enum WineRuntime {
             throw PatcherSetupError.message("The Windows environment is incomplete. Set up Wine again.")
         }
         let managed = ["dxgi.dll", "d3d11.dll"]
-        let markerValue = "\(WineRuntime.version)|d3dmetal-3.0-template-1.0.15"
-        let compatibleMarkerValues = [
-            "\(WineRuntime.version)|d3dmetal-3.0-template-1.0.11",
-            markerValue
-        ]
+        let markerValue = "\(WineRuntime.version)|\(WineRuntime.d3dMetalVersion)"
 
         func prefixIsReady() -> Bool {
             let marker = paths.d3dMetalPrefix.appendingPathComponent(".mnm-d3dmetal-ready")
             guard let installedMarker = try? String(contentsOf: marker, encoding: .utf8),
-                  compatibleMarkerValues.contains(installedMarker) else { return false }
+                  installedMarker == markerValue else { return false }
             let system32 = paths.d3dMetalPrefix.appendingPathComponent("drive_c/windows/system32", isDirectory: true)
             return managed.allSatisfy {
                 manager.contentsEqual(
