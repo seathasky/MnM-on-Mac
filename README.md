@@ -36,6 +36,14 @@ Select **Install /Update / Login** to open the official Monsters & Memories laun
 
 ## Troubleshooting
 
+### Rosetta Is Not Installed
+
+If **Set Up Wine** is grayed out, Rosetta may not be installed. Install it from Terminal:
+
+```terminal
+softwareupdate --install-rosetta --agree-to-license
+```
+
 ### Re-authenticate
 
 If the game asks you to re-authenticate, select **Re-authenticate…** in MnM on Mac. This resets and backs up the official launcher's saved login session without deleting the installed game. Sign in again through the official launcher afterward.
