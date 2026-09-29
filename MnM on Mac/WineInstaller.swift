@@ -197,8 +197,9 @@ final class RuntimeDownload: NSObject, URLSessionDownloadDelegate, @unchecked Se
 
 struct WineInstaller {
     let paths: WinePaths
-    func install(fetchVerified: ((RuntimeAsset, URL) throws -> Void)? = nil, progress: @escaping (String) -> Void) throws {
-        guard WineRuntime.rosettaAvailable else { throw PatcherSetupError.message("Install Apple's Rosetta before setting up Wine.") }
+    func install(fetchVerified: ((RuntimeAsset, URL) throws -> Void)? = nil, approveRosettaInstallation: () -> Bool = { false }, progress: @escaping (String) -> Void) throws {
+        try RosettaSetup.ensureInstalled(log: paths.setupLog, progress: progress, approveInstallation: approveRosettaInstallation)
+        progress("Setting up Wine…")
         let manager = FileManager.default
         let fetch = fetchVerified ?? { asset, file in
             progress("Downloading \(asset.label)…")

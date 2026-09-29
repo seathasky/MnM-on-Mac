@@ -110,7 +110,7 @@ enum WineRuntime {
     static let version = "sikarugir-10.0_6-dxmt-0.80"
     static let supportVersion = "Template-1.0.18"
     static let d3dMetalVersion = "d3dmetal-3.0-template-1.0.18"
-    static var rosettaAvailable: Bool { FileManager.default.fileExists(atPath: "/Library/Apple/usr/share/rosetta/rosetta") }
+    static var rosettaAvailable: Bool { RosettaSetup.available }
     static var readiness: String {
         let paths = WinePaths.current
         if AppStorage.requiresMigration { return "needs_storage_migration" }
@@ -472,4 +472,76 @@ enum GameSession {
         return process
     }
 
+}
+
+// Cache the executable probe: readiness is refreshed frequently by the UI.
+// Running an Intel binary also works on Intel Macs and avoids relying on
+// Rosetta's private installation paths or package receipts.
+enum RosettaSetup {
+    private static let lock = NSLock()
+    private static var cachedAvailable: Bool?
+    #if DEBUG
+    private static var simulatedInstallationCompleted = false
+    private static var simulation: String? {
+        ProcessInfo.processInfo.environment["MNM_ROSETTA_TEST"]
+    }
+    #endif
+
+    static var available: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        #if DEBUG
+        if ["missing", "failure"].contains(simulation ?? ""), !simulatedInstallationCompleted { return false }
+        #endif
+        if let cachedAvailable { return cachedAvailable }
+        let result = probe()
+        // Recheck failures so an installation outside the app is recognized.
+        if result { cachedAvailable = true }
+        return result
+    }
+
+    private static func probe() -> Bool {
+        do {
+            try WineRuntime.runQuiet(URL(fileURLWithPath: "/usr/bin/arch"),
+                                     ["-x86_64", "/usr/bin/true"], environment: ProcessInfo.processInfo.environment, timeout: 10,
+                                     step: "Check Rosetta")
+            return true
+        } catch { return false }
+    }
+
+    static func ensureInstalled(log: URL, progress: (String) -> Void,
+                                approveInstallation: () -> Bool) throws {
+        progress("Checking Rosetta…")
+        guard !available else { return }
+        guard approveInstallation() else {
+            throw PatcherSetupError.message("Rosetta installation was cancelled. Choose Set Up Wine to try again.")
+        }
+        progress("Installing Rosetta…")
+        #if DEBUG
+        if ["missing", "failure"].contains(simulation ?? "") {
+            Thread.sleep(forTimeInterval: 2)
+            if simulation == "failure" {
+                throw PatcherSetupError.message("Simulated Rosetta installation failure. Choose Set Up Wine to retry.")
+            }
+            // Never bypass the real prerequisite on a Mac without translation.
+            guard probe() else {
+                throw PatcherSetupError.message("The Rosetta success simulation requires Rosetta to already be installed. Disable MNM_ROSETTA_TEST to install it.")
+            }
+            lock.lock()
+            simulatedInstallationCompleted = true
+            cachedAvailable = true
+            lock.unlock()
+            return
+        }
+        #endif
+        try WineRuntime.runQuiet(URL(fileURLWithPath: "/usr/sbin/softwareupdate"),
+                                 ["--install-rosetta", "--agree-to-license"],
+                                 environment: ProcessInfo.processInfo.environment, timeout: 600, step: "Install Rosetta", log: log)
+        guard probe() else {
+            throw PatcherSetupError.message("Rosetta installation finished, but Intel apps still cannot run. Open Setup Log for details, then try Set Up Wine again.")
+        }
+        lock.lock()
+        cachedAvailable = true
+        lock.unlock()
+    }
 }

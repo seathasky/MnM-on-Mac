@@ -98,23 +98,64 @@ enum AppStorage {
                 }
             }
         }
+        pruneOfficialLauncherBackupsBestEffort(in: base)
         return destination
     }
 
-    static func backupOfficialLauncherData() throws -> URL? {
+    static func backupOfficialLauncherData(in base: URL = applicationSupport) throws -> URL? {
         let manager = FileManager.default
-        let source = officialLauncherDirectory
+        let source = base.appendingPathComponent("com.monstersandmemories.mnm-patcher-app", isDirectory: true)
         guard manager.fileExists(atPath: source.path) else { return nil }
         let values = try source.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
         guard values.isDirectory == true, values.isSymbolicLink != true else { throw StorageError.unsupportedFolder }
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyyMMdd-HHmmss"
-        var backup = applicationSupport.appendingPathComponent("com.monstersandmemories.mnm-patcher-app.backup-\(formatter.string(from: Date()))", isDirectory: true)
+        var backup = base.appendingPathComponent("com.monstersandmemories.mnm-patcher-app.backup-\(formatter.string(from: Date()))", isDirectory: true)
         if manager.fileExists(atPath: backup.path) {
-            backup = applicationSupport.appendingPathComponent("com.monstersandmemories.mnm-patcher-app.backup-\(UUID().uuidString)", isDirectory: true)
+            backup = base.appendingPathComponent("com.monstersandmemories.mnm-patcher-app.backup-\(UUID().uuidString)", isDirectory: true)
         }
         try manager.moveItem(at: source, to: backup)
+        // Moving a folder preserves its old modification date. Stamp this
+        // backup so UUID collision fallbacks can also be ordered correctly.
+        try? manager.setAttributes([.modificationDate: Date()], ofItemAtPath: backup.path)
+        pruneOfficialLauncherBackupsBestEffort(in: base)
         return backup
+    }
+
+    private static func pruneOfficialLauncherBackupsBestEffort(in base: URL) {
+        do { try pruneOfficialLauncherBackups(in: base) }
+        catch { NSLog("Could not prune official launcher backups: %@", error.localizedDescription) }
+    }
+
+    static func pruneOfficialLauncherBackups(in base: URL) throws {
+        let manager = FileManager.default
+        guard manager.fileExists(atPath: base.path) else { return }
+        let prefix = "com.monstersandmemories.mnm-patcher-app.backup-"
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        formatter.isLenient = false
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey, .contentModificationDateKey]
+        let entries = try manager.contentsOfDirectory(at: base, includingPropertiesForKeys: Array(keys))
+        let backups: [(url: URL, date: Date)] = try entries.compactMap { url in
+            guard url.lastPathComponent.hasPrefix(prefix) else { return nil }
+            let suffix = String(url.lastPathComponent.dropFirst(prefix.count))
+            let timestamp = formatter.date(from: suffix)
+            let datedBackup = timestamp.map { formatter.string(from: $0) == suffix } == true
+            guard datedBackup || UUID(uuidString: suffix) != nil else { return nil }
+            let values = try url.resourceValues(forKeys: keys)
+            guard values.isDirectory == true, values.isSymbolicLink != true else { return nil }
+            // The name records when legacy backups were made; Finder's date
+            // often reflects when the original launcher folder last changed.
+            return (url, datedBackup ? timestamp! : (values.contentModificationDate ?? .distantPast))
+        }
+        let newestFirst = backups.sorted {
+            if $0.date != $1.date { return $0.date > $1.date }
+            return $0.url.lastPathComponent > $1.url.lastPathComponent
+        }
+        for backup in newestFirst.dropFirst(2) {
+            try manager.removeItem(at: backup.url)
+        }
     }
 }

@@ -957,7 +957,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         }
         state = WineRuntime.readiness
         if state == "ready" { UserDefaults.standard.set(true, forKey: Self.completedInitialSetupKey) }
-        let setupRequired = ["needs_wine", "needs_libraries", "needs_runtime_update", "needs_prefix", "missing_launcher"].contains(state)
+        let setupRequired = ["needs_rosetta", "needs_wine", "needs_libraries", "needs_runtime_update", "needs_prefix", "missing_launcher"].contains(state)
         let initialSetup = !UserDefaults.standard.bool(forKey: Self.completedInitialSetupKey)
             && ["needs_login", "needs_game"].contains(state)
         let focusedSetup = setupRequired || initialSetup
@@ -1002,8 +1002,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             detailLabel.stringValue = "One local configuration step remains."
         case "needs_rosetta":
             statusLabel.stringValue = "Rosetta is required"
-            detailLabel.stringValue = "Install Apple's Rosetta, then reopen this app."
-            playButton.isEnabled = false
+            detailLabel.stringValue = "Set Up Wine will install Apple’s Rosetta first."
         case "missing_launcher":
             statusLabel.stringValue = "Install the official launcher"
             detailLabel.stringValue = "It is only used to sign in, install, and update the game."
@@ -1024,6 +1023,8 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         setErrorMessage(storageFailure ?? lastPatcherFailure)
         if !busy && lastPatcherFailure == nil {
             switch state {
+            case "needs_rosetta":
+                setProgressMessage("Set up Rosetta and Wine", detail: "Setup installs Apple’s Rosetta before preparing Wine.")
             case "needs_wine":
                 setProgressMessage("Initial setup", detail: "First-time setup usually takes 5–10 minutes, depending on your connection.")
             case "needs_libraries":
@@ -1042,7 +1043,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         guard !busy, storageFailure == nil else { return }
         if patcherProcess?.isRunning == true { update(); return }
         switch LauncherStep(readiness: state) {
-        case .setup: if state != "needs_rosetta" { setupWine() }; return
+        case .setup: setupWine(); return
         case .update: update(); return
         default: break
         }
@@ -1140,10 +1141,27 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         let setupEstimate = updatingRuntime
             ? "Updating support files. Your existing Windows environments and game data will not be changed."
             : "First-time setup usually takes 5–10 minutes, depending on your connection."
-        setProgressMessage(updatingRuntime ? "Updating runtime…" : "Setting up Wine…", detail: setupEstimate)
+        setProgressMessage("Checking Rosetta…", detail: setupEstimate)
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                try WineInstaller(paths: .current).install { message in
+                try WineInstaller(paths: .current).install(approveRosettaInstallation: {
+                    DispatchQueue.main.sync {
+                        let alert = NSAlert()
+                        alert.messageText = "Install Apple’s Rosetta?"
+                        alert.informativeText = "Rosetta is required to run Wine on this Mac. Choose Agree and Install to accept Apple’s Rosetta software license agreement and download Rosetta from Apple. Wine setup will continue automatically."
+                        alert.addButton(withTitle: "Agree and Install")
+                        alert.addButton(withTitle: "Cancel")
+                        alert.addButton(withTitle: "View License")
+                        while true {
+                            switch alert.runModal() {
+                            case .alertFirstButtonReturn: return true
+                            case .alertThirdButtonReturn:
+                                NSWorkspace.shared.open(URL(string: "https://www.apple.com/legal/sla/")!)
+                            default: return false
+                            }
+                        }
+                    }
+                }) { message in
                     DispatchQueue.main.async {
                         self.setProgressMessage(message, detail: setupEstimate)
                     }
