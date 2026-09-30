@@ -339,6 +339,14 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             }
             try AppStorage.prepare()
         } catch { storageFailure = error.localizedDescription }
+        if storageFailure == nil {
+            let app = Bundle.main.bundleURL
+            let runningApps = NSWorkspace.shared.runningApplications.compactMap(\.bundleURL)
+            DispatchQueue.global(qos: .utility).async {
+                do { try AppUpdateInstaller.cleanupPreviousInstalls(currentApp: app, runningApps: runningApps) }
+                catch { NSLog("Could not check updater leftovers: %@", error.localizedDescription) }
+            }
+        }
         refresh()
         if usesOfficialLauncher {
             compactSetupWindow = CompactSetupWindow(target: self, retryAction: #selector(update))

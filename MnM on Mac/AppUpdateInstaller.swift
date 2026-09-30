@@ -3,6 +3,52 @@ import Foundation
 /// Stages a validated replacement beside the current app. Never deletes the
 /// current app; the replacement helper keeps a recoverable previous copy.
 struct AppUpdateInstaller {
+    /// Called only after this app reaches native startup. Keep failed update
+    /// replacements and running backups intact; move confirmed leftovers to Trash.
+    @discardableResult
+    static func cleanupPreviousInstalls(currentApp: URL, runningApps: [URL],
+                                       trash: ((URL) throws -> Void)? = nil) throws -> Int {
+        let manager = FileManager.default
+        guard currentApp.pathExtension == "app",
+              let current = Bundle(url: currentApp), let identifier = current.bundleIdentifier,
+              let version = current.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+              try currentApp.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true else { return 0 }
+        let parent = currentApp.deletingLastPathComponent()
+        let backupPrefix = currentApp.lastPathComponent + ".previous-"
+        let stagePrefix = "." + currentApp.lastPathComponent + ".update-"
+        let entries = try manager.contentsOfDirectory(at: parent, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        let dispose: (URL) throws -> Void = trash ?? { try manager.trashItem(at: $0, resultingItemURL: nil) }
+        var removed = 0
+        for entry in entries {
+            let name = entry.lastPathComponent
+            let isBackup = name.hasPrefix(backupPrefix)
+            let isStage = name.hasPrefix(stagePrefix)
+            guard isBackup || isStage else { continue }
+            let prefix = isBackup ? backupPrefix : stagePrefix
+            guard let uuid = UUID(uuidString: String(name.dropFirst(prefix.count))),
+                  name == prefix + uuid.uuidString else { continue }
+            let values = try entry.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard values.isDirectory == true, values.isSymbolicLink != true,
+                  !runningApps.contains(where: { $0.resolvingSymlinksInPath().path == entry.resolvingSymlinksInPath().path }) else { continue }
+            if isBackup {
+                guard let backup = Bundle(url: entry), backup.bundleIdentifier == identifier,
+                      let oldVersion = backup.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+                      oldVersion.compare(version, options: .numeric) != .orderedDescending else { continue }
+            } else {
+                // A staged .app may belong to a pending/failed update: never touch it.
+                let children = try manager.contentsOfDirectory(at: entry, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                guard children.allSatisfy({ child in
+                    guard child.lastPathComponent == "install.sh",
+                          let info = try? child.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]) else { return false }
+                    return info.isRegularFile == true && info.isSymbolicLink != true
+                }) else { continue }
+            }
+            do { try dispose(entry); removed += 1 }
+            catch { NSLog("Could not clean updater leftover %@: %@", name, error.localizedDescription) }
+        }
+        return removed
+    }
+
     struct Prepared {
         let currentApp: URL
         let replacement: URL
