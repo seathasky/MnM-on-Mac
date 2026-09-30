@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import CryptoKit
 
 /// A dedicated launcher runtime keeps compatibility changes out of game Wine
 /// prefixes and graphics drivers. Both upgrades and first installs use this path.
@@ -24,15 +25,15 @@ struct WindowsPatcherInstaller {
     var engine: URL { runtime.appendingPathComponent("engine", isDirectory: true) }
     var prefix: URL { paths.support.appendingPathComponent("Prefix-Launcher", isDirectory: true) }
     var wine: URL { engine.appendingPathComponent("bin/" + (paths.wine?.lastPathComponent ?? "wine")) }
+    private var retinaRenderer: URL { assets.deletingLastPathComponent().appendingPathComponent("MnMLauncherRetina.dylib") }
     private var manifest: URL { assets.appendingPathComponent("manifest.json") }
     private var runtimeMarker: URL { runtime.appendingPathComponent("installed-manifest.json") }
     private var launcherMarker: URL { workingDirectory.appendingPathComponent(".mnm-windows-launcher-ready") }
     private var displayMarker: URL { prefix.appendingPathComponent(".mnm-launcher-display-ready") }
-    // Wine's Retina backing coordinates can change independently of child
-    // HWND/GDI coordinates when macOS changes its scaled display resolution.
-    // Keep this private launcher in points. Game prefixes are unaffected.
-    private var launcherDPI: Int { 96 }
-    private var displayConfiguration: String { "startup=3;retina=0;dpi=96" }
+    // The launcher-only Cocoa bridge keeps Wine's 2x mapping stable across
+    // resolution changes. Window fitting still uses live macOS usable bounds.
+    private var launcherDPI: Int { 192 }
+    private var displayConfiguration: String { "startup=4;retina=locked;dpi=192" }
 
     /// Distinguish first-time setup from a bundled compatibility refresh.
     /// An existing launcher can be updated quietly; this never skips `ready`
@@ -84,6 +85,8 @@ struct WindowsPatcherInstaller {
         process.currentDirectoryURL = workingDirectory
         var launchEnvironment = environment()
         launchEnvironment["MNM_WEBVIEW_BRIDGE_SESSION"] = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        launchEnvironment["DYLD_INSERT_LIBRARIES"] = retinaRenderer.path
+        launchEnvironment["MNM_LAUNCHER_RETINA_LOCK"] = "1"
         // Per-launch diagnostics contain compatibility stages only, never
         // account data or browser requests. Retain one prior attempt as well,
         // so automatic recovery does not erase the original failure evidence.
@@ -101,6 +104,7 @@ struct WindowsPatcherInstaller {
         try Data(header.utf8).write(to: diagnostics, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: diagnostics.path)
         launchEnvironment["MNM_LAUNCHER_DIAGNOSTICS"] = try Self.windowsPath(diagnostics)
+        launchEnvironment["MNM_LAUNCHER_NATIVE_LOG"] = diagnostics.path
         if let controlsDirectory {
             launchEnvironment["MNM_WEBVIEW_FOOTER"] = "1"
             launchEnvironment["MNM_WEBVIEW_CONTROL_DIR"] = try Self.windowsPath(controlsDirectory)
@@ -160,9 +164,13 @@ struct WindowsPatcherInstaller {
               let hashes = object["files"] as? [String: String] else {
             throw PatcherSetupError.message("This app is missing its Windows launcher compatibility files.")
         }
-        for name in ["user32.dll", "ole32.dll", "MnMWebViewBridge.dll", "MnMWindowsLauncher.exe"] {
+        for name in ["user32.dll", "ole32.dll", "MnMWebViewBridge.dll", "MnMWindowsLauncher.exe", "MnMLauncherRetina.dylib"] {
             guard let hash = hashes[name] else { throw PatcherSetupError.message("The launcher compatibility package is incomplete.") }
-            try WineInstaller.verify(assets.appendingPathComponent(name), digest: hash)
+            if name == "MnMLauncherRetina.dylib" {
+                try verifyRetinaRenderer(digest: hash)
+            } else {
+                try WineInstaller.verify(assets.appendingPathComponent(name), digest: hash)
+            }
         }
         if !paths.initialized {
             try WineInstaller(paths: paths).install(approveRosettaInstallation: approveRosettaInstallation, progress: progress)
@@ -193,9 +201,11 @@ struct WindowsPatcherInstaller {
         // These settings belong only to the launcher's private Wine prefix.
         // Never change the game's display resolution, DPI, or graphics prefix.
         let displaySettings = [
-            ("HKCU\\Software\\Wine\\Mac Driver", "RetinaMode", "REG_SZ", "n"),
+            ("HKCU\\Software\\Wine\\Mac Driver", "RetinaMode", "REG_SZ", "y"),
             ("HKCU\\Control Panel\\Desktop", "LogPixels", "REG_DWORD", String(launcherDPI)),
-            ("HKCU\\Control Panel\\Desktop", "Win8DpiScaling", "REG_DWORD", "1")
+            ("HKCU\\Control Panel\\Desktop", "Win8DpiScaling", "REG_DWORD", "1"),
+            ("HKCU\\Control Panel\\Desktop", "FontSmoothing", "REG_SZ", "2"),
+            ("HKCU\\Control Panel\\Desktop", "FontSmoothingType", "REG_DWORD", "2")
         ]
         for (key, name, type, value) in displaySettings {
             try WineRuntime.runQuiet(wine, ["reg.exe", "add", key, "/v", name, "/t", type, "/d", value, "/f"],
@@ -286,6 +296,29 @@ struct WindowsPatcherInstaller {
         let base = prefix.appendingPathComponent("drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application", isDirectory: true)
         return ((try? manager.contentsOfDirectory(at: base, includingPropertiesForKeys: nil)) ?? []).contains {
             manager.fileExists(atPath: $0.appendingPathComponent("msedgewebview2.exe").path)
+        }
+    }
+
+    private func verifyRetinaRenderer(digest: String) throws {
+        let manager = FileManager.default
+        let temporary = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("mnm-retina-validation-" + UUID().uuidString, isDirectory: true)
+        try manager.createDirectory(at: temporary, withIntermediateDirectories: false,
+                                    attributes: [.posixPermissions: 0o700])
+        defer { try? manager.removeItem(at: temporary) }
+        let original = retinaRenderer
+        try WineRuntime.runQuiet(URL(fileURLWithPath: "/usr/bin/codesign"), ["--verify", "--strict", original.path],
+                                 environment: ProcessInfo.processInfo.environment, timeout: 15,
+                                 step: "Validate launcher renderer signature", log: paths.setupLog)
+        let copy = temporary.appendingPathComponent("renderer.dylib")
+        try manager.copyItem(at: original, to: copy)
+        try WineRuntime.runQuiet(URL(fileURLWithPath: "/usr/bin/codesign"), ["--remove-signature", copy.path],
+                                 environment: ProcessInfo.processInfo.environment, timeout: 15,
+                                 step: "Validate launcher renderer code", log: paths.setupLog)
+        let canonical = try LauncherRendererIntegrity.canonical(Data(contentsOf: copy))
+        let actual = SHA256.hash(data: canonical).map { String(format: "%02x", $0) }.joined()
+        guard actual == digest else {
+            throw PatcherSetupError.message("The launcher renderer checksum did not match. Rebuild or reinstall MnM on Mac.")
         }
     }
 

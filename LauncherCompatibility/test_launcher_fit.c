@@ -19,6 +19,11 @@ int main(void) {
     assert(launcher_fit_percent(125,970,700,88,1920,1080,3,29,20)==125);
     assert(launcher_fit_percent(0,970,700,88,1280,650,3,29,20)==76);
     assert(launcher_fit_percent(0,970,700,88,1920,1080,3,29,20)==100);
+    /* Locked Retina coordinates after live native work-area conversion. */
+    int retinaSmall=launcher_fit_percent(125,1940,1400,176,2560,1300,6,58,40);
+    assert(retinaSmall==76);
+    assert(1576*retinaSmall/100+58+40<=1300);
+    assert(launcher_fit_percent(0,1940,1400,176,3840,2160,6,58,40)==100);
     /* Small work areas cap even a saved manual zoom. */
     int fit=launcher_fit_percent(125,1940,1400,176,2560,1460,6,57,40);
     assert(fit==86);

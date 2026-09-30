@@ -110,8 +110,8 @@ static void scale_update(HWND root) {
     if(!GetMonitorInfoW(MonitorFromWindow(root,MONITOR_DEFAULTTONEAREST),&monitor))return;
     RECT outer,client;GetWindowRect(root,&outer);real_getclientrect(root,&client);
     // Wine can keep the old monitor work area after a macOS resolution change.
-    // Native screen rectangles are live and share this prefix's 96-DPI units.
-    if(footer_work_count && scale_base_dpi==96) {
+    // Native screen rectangles use the same locked 2x coordinate mapping.
+    if(footer_work_count) {
         LONGLONG best=-1;int selected=0;
         for(int i=0;i<footer_work_count;i++) {
             RECT overlap;

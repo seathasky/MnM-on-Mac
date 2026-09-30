@@ -35,13 +35,13 @@ final class WindowsLauncherControls {
             lastHeartbeat = Date()
         }
         let scale = [0, 60, 70, 80, 90, 100, 125].contains(launcherScale) ? launcherScale : 0
-        // Report current usable screen areas in macOS points, not backing
-        // pixels or Wine's potentially cached pre-resolution-change work area.
+        // Fit to native usable bounds, converted to the launcher's locked 2x
+        // Wine coordinates. Never use Wine's cached pre-change monitor area.
         let screens = NSScreen.screens
         let top = screens.first?.frame.maxY ?? 0
         let workAreas = screens.prefix(16).enumerated().map { index, screen in
             let frame = screen.visibleFrame
-            return "work\(index)=\(Int(frame.minX)),\(Int(top - frame.maxY)),\(Int(frame.width)),\(Int(frame.height))\n"
+            return "work\(index)=\(Int(frame.minX * 2)),\(Int((top - frame.maxY) * 2)),\(Int(frame.width * 2)),\(Int(frame.height * 2))\n"
         }.joined()
         let state = "version=\(version)\nbackend=\(backend.rawValue)\nbusy=\(busy ? 1 : 0)\nupdate=\(updateAvailable ? 1 : 0)\nscale=\(scale)\n" + workAreas
         guard state != lastState else { return }

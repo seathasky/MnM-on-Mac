@@ -10,6 +10,7 @@
 		29837305304C051900712285 /* MnMGameBridge in CopyFiles */ = {isa = PBXBuildFile; fileRef = 298372D2304BFE6000712285 /* MnMGameBridge */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		29837306304C051900712285 /* MnMPatcherGuard in CopyFiles */ = {isa = PBXBuildFile; fileRef = 298372E4304C01D400712285 /* MnMPatcherGuard */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		29837307304C051900712285 /* MnMPlayRedirect.dylib in CopyFiles */ = {isa = PBXBuildFile; fileRef = 298372F3304C034C00712285 /* MnMPlayRedirect.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		4D4E4D524554494E41000002 /* LauncherNativeAssets/MnMLauncherRetina.dylib in CopyFiles */ = {isa = PBXBuildFile; fileRef = 4D4E4D524554494E41000001 /* LauncherNativeAssets/MnMLauncherRetina.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		4D4E4D57494E434F4D500002 /* LauncherCompatibilityAssets in Resources */ = {isa = PBXBuildFile; fileRef = 4D4E4D57494E434F4D500001 /* LauncherCompatibilityAssets */; };
 /* End PBXBuildFile section */
 
@@ -65,6 +66,7 @@
 				29837305304C051900712285 /* MnMGameBridge in CopyFiles */,
 				29837306304C051900712285 /* MnMPatcherGuard in CopyFiles */,
 				29837307304C051900712285 /* MnMPlayRedirect.dylib in CopyFiles */,
+				4D4E4D524554494E41000002 /* LauncherNativeAssets/MnMLauncherRetina.dylib in CopyFiles */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -75,6 +77,7 @@
 		298372D2304BFE6000712285 /* MnMGameBridge */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = MnMGameBridge; sourceTree = BUILT_PRODUCTS_DIR; };
 		298372E4304C01D400712285 /* MnMPatcherGuard */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = MnMPatcherGuard; sourceTree = BUILT_PRODUCTS_DIR; };
 		298372F3304C034C00712285 /* MnMPlayRedirect.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = MnMPlayRedirect.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
+		4D4E4D524554494E41000001 /* LauncherNativeAssets/MnMLauncherRetina.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; path = LauncherNativeAssets/MnMLauncherRetina.dylib; sourceTree = "<group>"; };
 		4D4E4D57494E434F4D500001 /* LauncherCompatibilityAssets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = LauncherCompatibilityAssets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -166,6 +169,7 @@
 				298372F4304C034C00712285 /* MnMPlayRedirect */,
 				298372AB304BFCCF00712285 /* Products */,
 				4D4E4D57494E434F4D500001 /* LauncherCompatibilityAssets */,
+				4D4E4D524554494E41000001 /* LauncherNativeAssets/MnMLauncherRetina.dylib */,
 			);
 			sourceTree = "<group>";
 		};
@@ -544,7 +548,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 2.0.2;
+				MARKETING_VERSION = 2.0.3;
 				PRODUCT_BUNDLE_IDENTIFIER = io.github.seathasky.mnmonmac;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -601,7 +605,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 2.0.2;
+				MARKETING_VERSION = 2.0.3;
 				PRODUCT_BUNDLE_IDENTIFIER = io.github.seathasky.mnmonmac;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
