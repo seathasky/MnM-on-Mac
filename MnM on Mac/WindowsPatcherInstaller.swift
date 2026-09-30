@@ -28,10 +28,11 @@ struct WindowsPatcherInstaller {
     private var runtimeMarker: URL { runtime.appendingPathComponent("installed-manifest.json") }
     private var launcherMarker: URL { workingDirectory.appendingPathComponent(".mnm-windows-launcher-ready") }
     private var displayMarker: URL { prefix.appendingPathComponent(".mnm-launcher-display-ready") }
-    private var launcherDPI: Int {
-        (NSScreen.main?.backingScaleFactor ?? 1) >= 1.5 ? 192 : 96
-    }
-    private var displayConfiguration: String { "startup=2;retina=1;dpi=\(launcherDPI)" }
+    // Wine's Retina backing coordinates can change independently of child
+    // HWND/GDI coordinates when macOS changes its scaled display resolution.
+    // Keep this private launcher in points. Game prefixes are unaffected.
+    private var launcherDPI: Int { 96 }
+    private var displayConfiguration: String { "startup=3;retina=0;dpi=96" }
 
     /// Distinguish first-time setup from a bundled compatibility refresh.
     /// An existing launcher can be updated quietly; this never skips `ready`
@@ -76,13 +77,30 @@ struct WindowsPatcherInstaller {
     }
 
     func makeProcess(controlsDirectory: URL? = nil, graphicsBackend: GraphicsBackend = .d3dMetal,
-                     appVersion: String = "2.0.0") throws -> Process {
+                     appVersion: String = "2.0.0", preparationStarted: TimeInterval? = nil) throws -> Process {
         guard ready else { throw PatcherSetupError.message("The Windows launcher needs its compatibility update first.") }
         let process = Process()
         process.executableURL = wine
         process.currentDirectoryURL = workingDirectory
         var launchEnvironment = environment()
         launchEnvironment["MNM_WEBVIEW_BRIDGE_SESSION"] = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        // Per-launch diagnostics contain compatibility stages only, never
+        // account data or browser requests. Retain one prior attempt as well,
+        // so automatic recovery does not erase the original failure evidence.
+        let diagnostics = paths.support.appendingPathComponent("Logs/launcher-startup.log")
+        try FileManager.default.createDirectory(at: diagnostics.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: diagnostics.path) {
+            let prior = diagnostics.deletingLastPathComponent().appendingPathComponent("launcher-startup-previous.log")
+            try Data(contentsOf: diagnostics).write(to: prior, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: prior.path)
+        }
+        var header = "MnM launcher startup diagnostics\n"
+        if let started = preparationStarted {
+            header += String(format: "native preparation before helper: %.3f seconds\n", ProcessInfo.processInfo.systemUptime - started)
+        }
+        try Data(header.utf8).write(to: diagnostics, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: diagnostics.path)
+        launchEnvironment["MNM_LAUNCHER_DIAGNOSTICS"] = try Self.windowsPath(diagnostics)
         if let controlsDirectory {
             launchEnvironment["MNM_WEBVIEW_FOOTER"] = "1"
             launchEnvironment["MNM_WEBVIEW_CONTROL_DIR"] = try Self.windowsPath(controlsDirectory)
@@ -175,7 +193,7 @@ struct WindowsPatcherInstaller {
         // These settings belong only to the launcher's private Wine prefix.
         // Never change the game's display resolution, DPI, or graphics prefix.
         let displaySettings = [
-            ("HKCU\\Software\\Wine\\Mac Driver", "RetinaMode", "REG_SZ", "y"),
+            ("HKCU\\Software\\Wine\\Mac Driver", "RetinaMode", "REG_SZ", "n"),
             ("HKCU\\Control Panel\\Desktop", "LogPixels", "REG_DWORD", String(launcherDPI)),
             ("HKCU\\Control Panel\\Desktop", "Win8DpiScaling", "REG_DWORD", "1")
         ]

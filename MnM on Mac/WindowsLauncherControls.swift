@@ -1,12 +1,15 @@
 import Foundation
+import AppKit
 
 /// An app-owned, per-launch command channel for the official window's footer.
 /// Contains UI actions/settings only; credentials and rendered pixels never enter it.
 final class WindowsLauncherControls {
     enum Action: String {
-        case ready, discord, updates, about, legal, options
+        case opened, ready, discord, updates, about, legal, options
         case appUpdate = "app-update"
         case gameFolder = "game-folder"
+        case wineConfig = "wine-config"
+        case wineRegistry = "wine-registry"
         case d3dMetal = "graphics:d3dmetal"
         case dxmt = "graphics:metal"
         case dxvk = "graphics:dxvk"
@@ -32,7 +35,15 @@ final class WindowsLauncherControls {
             lastHeartbeat = Date()
         }
         let scale = [0, 60, 70, 80, 90, 100, 125].contains(launcherScale) ? launcherScale : 0
-        let state = "version=\(version)\nbackend=\(backend.rawValue)\nbusy=\(busy ? 1 : 0)\nupdate=\(updateAvailable ? 1 : 0)\nscale=\(scale)\n"
+        // Report current usable screen areas in macOS points, not backing
+        // pixels or Wine's potentially cached pre-resolution-change work area.
+        let screens = NSScreen.screens
+        let top = screens.first?.frame.maxY ?? 0
+        let workAreas = screens.prefix(16).enumerated().map { index, screen in
+            let frame = screen.visibleFrame
+            return "work\(index)=\(Int(frame.minX)),\(Int(top - frame.maxY)),\(Int(frame.width)),\(Int(frame.height))\n"
+        }.joined()
+        let state = "version=\(version)\nbackend=\(backend.rawValue)\nbusy=\(busy ? 1 : 0)\nupdate=\(updateAvailable ? 1 : 0)\nscale=\(scale)\n" + workAreas
         guard state != lastState else { return }
         let file = directory.appendingPathComponent("state.txt")
         try Data(state.utf8).write(to: file, options: .atomic)

@@ -9,11 +9,26 @@
 #include <wchar.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "startup_diagnostics.h"
+#include "loader_address.h"
 typedef NTSTATUS (NTAPI *QUERY_PROCESS)(HANDLE,PROCESSINFOCLASS,PVOID,ULONG,PULONG);
 static DWORD injected[1024],family[1024];static unsigned injected_count,family_count;
 static HANDLE family_handles[1024];
 static DWORD root_pid;static BOOL root_visible;
-static BOOL CALLBACK visible_host(HWND window,LPARAM unused){DWORD pid;WCHAR cls[64];GetWindowThreadProcessId(window,&pid);GetClassNameW(window,cls,64);if(pid==root_pid && !wcscmp(cls,L"Tauri Window") && (IsWindowVisible(window)||IsIconic(window)))root_visible=TRUE;return TRUE;}
+static BOOL root_ready;
+static BOOL CALLBACK visible_host(HWND window,LPARAM unused){DWORD pid;WCHAR cls[64];GetWindowThreadProcessId(window,&pid);GetClassNameW(window,cls,64);if(pid==root_pid && !wcscmp(cls,L"Tauri Window")){if(IsWindowVisible(window)||IsIconic(window))root_visible=TRUE;if(GetPropW(window,L"MnMFrameWidth"))root_ready=TRUE;}return TRUE;}
+static BOOL controller_expired(ULONGLONG started) {
+    WCHAR controls[32768],heartbeat[32768];
+    DWORD n=GetEnvironmentVariableW(L"MNM_WEBVIEW_CONTROL_DIR",controls,32768);
+    if(!n || n>=32768 || GetTickCount64()-started<20000)return FALSE;
+    if(swprintf(heartbeat,32768,L"%ls\\heartbeat.txt",controls)<0)return FALSE;
+    WIN32_FILE_ATTRIBUTE_DATA info;
+    if(!GetFileAttributesExW(heartbeat,GetFileExInfoStandard,&info))return TRUE;
+    FILETIME now;GetSystemTimeAsFileTime(&now);ULARGE_INTEGER current,last;
+    current.LowPart=now.dwLowDateTime;current.HighPart=now.dwHighDateTime;
+    last.LowPart=info.ftLastWriteTime.dwLowDateTime;last.HighPart=info.ftLastWriteTime.dwHighDateTime;
+    return current.QuadPart>last.QuadPart && current.QuadPart-last.QuadPart>200000000ULL;
+}
 static void finish_browsers(void){for(unsigned i=1;i<family_count;i++)if(family_handles[i]){if(WaitForSingleObject(family_handles[i],50)==WAIT_TIMEOUT)TerminateProcess(family_handles[i],0);CloseHandle(family_handles[i]);}}
 static int game_wait(void) {
     WCHAR controls[32768]={0},ticket[33],request[32768],temporary[32768],result[32768],heartbeat[32768];
@@ -51,7 +66,7 @@ static int game_wait(void) {
     }
 }
 static BOOL CALLBACK close_host(HWND window,LPARAM pid){DWORD owner=0;GetWindowThreadProcessId(window,&owner);if(owner==(DWORD)pid && GetWindow(window,GW_OWNER)==NULL)PostMessageW(window,WM_CLOSE,0,0);return TRUE;}
-static BOOL CALLBACK show_host(HWND window,LPARAM pid){DWORD owner=0;WCHAR cls[64]={0};GetWindowThreadProcessId(window,&owner);GetClassNameW(window,cls,64);if(owner==(DWORD)pid && !wcscmp(cls,L"Tauri Window")){ShowWindow(window,SW_RESTORE);SetForegroundWindow(window);}return TRUE;}
+static BOOL CALLBACK show_host(HWND window,LPARAM pid){DWORD owner=0;WCHAR cls[64]={0};GetWindowThreadProcessId(window,&owner);GetClassNameW(window,cls,64);if(owner==(DWORD)pid && !wcscmp(cls,L"Tauri Window")){ShowWindow(window,SW_RESTORE);SetWindowPos(window,HWND_NOTOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE);BringWindowToTop(window);SetForegroundWindow(window);}return TRUE;}
 static int contains(DWORD *ids,unsigned n,DWORD pid){for(unsigned i=0;i<n;i++)if(ids[i]==pid)return 1;return 0;}
 static int browser_command(HANDLE process){
     QUERY_PROCESS query=(void*)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtQueryInformationProcess");
@@ -61,21 +76,70 @@ static int browser_command(HANDLE process){
     if(!ReadProcessMemory(process,(BYTE*)parameters+0x70,&command,sizeof(command),&read) || command.Length>32766)return 0;
     WCHAR text[16384]={0};
     if(!ReadProcessMemory(process,command.Buffer,text,command.Length,&read))return 0;
-    return wcsstr(text,L"--webview-exe-name=mnm_launcher.exe") &&
-        (!wcsstr(text,L"--type=") || wcsstr(text,L"--type=gpu-process"));
+    return (wcsstr(text,L"--webview-exe-name=mnm_launcher.exe") &&
+        (!wcsstr(text,L"--type=") || wcsstr(text,L"--type=gpu-process")))?1:-1;
+}
+static LPTHREAD_START_ROUTINE remote_loader(DWORD pid) {
+    // GetProcAddress may return a forwarded KERNELBASE address. Resolve the
+    // module containing that address, then its base in THIS target process.
+    // The helper's absolute address is not guaranteed valid under Wine/ASLR.
+    FARPROC local=GetProcAddress(GetModuleHandleW(L"kernel32.dll"),"LoadLibraryW");
+    HMODULE owner=NULL;WCHAR path[32768];
+    if(!local || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                    (LPCWSTR)local,&owner)){startup_trace("loader resolution: local export owner unavailable");return NULL;}
+    DWORD count=GetModuleFileNameW(owner,path,32768);if(!count || count>=32768)return NULL;
+    LPCWSTR base=wcsrchr(path,L'\\');base=base?base+1:path;
+    HANDLE snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPMODULE|TH32CS_SNAPMODULE32,pid);
+    if(snapshot==INVALID_HANDLE_VALUE){startup_trace("loader resolution: target module snapshot unavailable");return NULL;}
+    MODULEENTRY32W module={0};module.dwSize=sizeof(module);LPTHREAD_START_ROUTINE remote=NULL;
+    if(Module32FirstW(snapshot,&module))do {
+        if(!_wcsicmp(module.szModule,base)){
+            remote=(LPTHREAD_START_ROUTINE)relocated_loader((uintptr_t)local,(uintptr_t)owner,
+                                                           (uintptr_t)module.modBaseAddr,module.modBaseSize);
+            break;
+        }
+    }while(Module32NextW(snapshot,&module));
+    CloseHandle(snapshot);
+    char detail[144];snprintf(detail,sizeof(detail),"loader address target=%lu local=%p remote=%p",(unsigned long)pid,(void*)local,(void*)remote);startup_trace(detail);
+    return remote;
 }
 static int attach(DWORD pid,LPCWSTR dll,int check_browser){
     HANDLE process=OpenProcess(PROCESS_CREATE_THREAD|PROCESS_QUERY_INFORMATION|PROCESS_VM_OPERATION|PROCESS_VM_WRITE|PROCESS_VM_READ,FALSE,pid);
     if(!process)return 0;
-    if(check_browser && !browser_command(process)){CloseHandle(process);return 0;}
+    if(check_browser){int role=browser_command(process);if(role!=1){CloseHandle(process);return role;}}
+    char entering[96];snprintf(entering,sizeof(entering),"%s injection beginning target=%lu",check_browser?"browser":"host",(unsigned long)pid);startup_trace(entering);
+    LPTHREAD_START_ROUTINE loader=remote_loader(pid);
+    if(!loader && !check_browser){
+        // A suspended Wine host has not populated its imported-module list yet.
+        // Its first remote thread performs that bootstrap before entering the
+        // fixed Wine system-DLL thunk. Use the established bootstrap only here;
+        // already running browser targets still require their actual mapping.
+        loader=(LPTHREAD_START_ROUTINE)GetProcAddress(GetModuleHandleW(L"kernel32.dll"),"LoadLibraryW");
+        startup_trace("suspended host uses Wine bootstrap loader");
+    }
+    if(!loader){CloseHandle(process);startup_trace("target loader not available yet");return 0;}
     SIZE_T size=(wcslen(dll)+1)*sizeof(WCHAR);
     void *remote=VirtualAllocEx(process,NULL,size,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
     int ok=0;
     if(remote && WriteProcessMemory(process,remote,dll,size,NULL)){
-        HANDLE thread=CreateRemoteThread(process,NULL,0,(LPTHREAD_START_ROUTINE)GetProcAddress(GetModuleHandleW(L"kernel32.dll"),"LoadLibraryW"),remote,0,NULL);
+        HANDLE thread=CreateRemoteThread(process,NULL,0,loader,remote,0,NULL);
         if(thread){
             DWORD status=0;
-            if(WaitForSingleObject(thread,5000)==WAIT_OBJECT_0){GetExitCodeThread(thread,&status);ok=status!=0;}
+            if(WaitForSingleObject(thread,5000)==WAIT_OBJECT_0){
+                GetExitCodeThread(thread,&status);
+                // A crashing loader thread also has a nonzero exit status.
+                // Confirm the DLL exists in the target instead of counting an
+                // exception as a successful injection.
+                HANDLE modules=CreateToolhelp32Snapshot(TH32CS_SNAPMODULE|TH32CS_SNAPMODULE32,pid);
+                MODULEENTRY32W module={0};module.dwSize=sizeof(module);
+                if(modules!=INVALID_HANDLE_VALUE){
+                    if(Module32FirstW(modules,&module))do {
+                        if(!_wcsicmp(module.szModule,L"MnMWebViewBridge.dll")){ok=status!=0 && status!=STILL_ACTIVE;break;}
+                    }while(Module32NextW(modules,&module));
+                    CloseHandle(modules);
+                }
+                char loaded[96];snprintf(loaded,sizeof(loaded),"loader finished target=%lu status=%08lx module=%s",(unsigned long)pid,(unsigned long)status,ok?"verified":"not verified");startup_trace(loaded);
+            }
             // An unresolved load retains its buffer until process exit rather
             // than freeing memory a still-running loader thread could access.
             else remote=NULL;
@@ -83,7 +147,41 @@ static int attach(DWORD pid,LPCWSTR dll,int check_browser){
         }
     }
     if(remote)VirtualFreeEx(process,remote,0,MEM_RELEASE);
+    char detail[96];snprintf(detail,sizeof(detail),"%s injection target=%lu result=%s",check_browser?"browser":"host",(unsigned long)pid,ok?"success":"failed");startup_trace(detail);
     CloseHandle(process);return ok;
+}
+/* Wine remote-thread creation can block before WaitForSingleObject is reached.
+ * Never let browser injection monopolize the close/heartbeat/startup watchdog.
+ * Jobs reference the launch's DLL path, valid until the helper process exits.
+ */
+typedef struct {DWORD pid;LPCWSTR dll;HANDLE thread;volatile LONG done;int result;} INJECTION_JOB;
+static INJECTION_JOB browser_jobs[16];
+static DWORD WINAPI inject_browser(void *context) {
+    INJECTION_JOB *job=context;
+    job->result=attach(job->pid,job->dll,TRUE);
+    InterlockedExchange(&job->done,1);return 0;
+}
+static void reap_browser_jobs(void) {
+    for(unsigned i=0;i<16;i++){
+        INJECTION_JOB *job=&browser_jobs[i];
+        if(job->pid && InterlockedCompareExchange(&job->done,0,0)){
+            // Negative means a verified non-paint child: no injection needed,
+            // and no reason to create another inspection thread every 100ms.
+            if(job->result!=0 && !contains(injected,injected_count,job->pid) && injected_count<1024)injected[injected_count++]=job->pid;
+            CloseHandle(job->thread);ZeroMemory(job,sizeof(*job));
+        }
+    }
+}
+static void queue_browser(DWORD pid,LPCWSTR dll) {
+    int available=-1;
+    for(unsigned i=0;i<16;i++){
+        if(browser_jobs[i].pid==pid)return;
+        if(!browser_jobs[i].pid && available<0)available=(int)i;
+    }
+    if(available<0)return;
+    INJECTION_JOB *job=&browser_jobs[available];job->pid=pid;job->dll=dll;
+    job->thread=CreateThread(NULL,0,inject_browser,job,0,NULL);
+    if(!job->thread)ZeroMemory(job,sizeof(*job));
 }
 static int launcher_main(int argc,wchar_t **argv){
     if(argc==2 && !wcscmp(argv[1],L"--game-wait"))return game_wait();
@@ -94,6 +192,7 @@ static int launcher_main(int argc,wchar_t **argv){
         SetEvent(event);CloseHandle(event);return 0;
     }
     if(argc!=3 || wcschr(argv[1],L'"') || wcschr(argv[2],L'"'))return 2;
+    startup_trace("launcher session starting");
     wchar_t dll[32768],command[32768],session[48]={0};
     DWORD len=GetModuleFileNameW(NULL,dll,32768);
     if(!len || len>=32768)return 3;
@@ -121,12 +220,28 @@ static int launcher_main(int argc,wchar_t **argv){
     // Polling after launch races the loader and misses controller callbacks.
     if(!CreateProcessW(argv[1],command,NULL,NULL,FALSE,CREATE_SUSPENDED,NULL,argv[2],&startup,&child))return 5;
     if(attach(child.dwProcessId,dll,FALSE))injected[injected_count++]=child.dwProcessId;
+    else {
+        // Never run an unbridged host and pretend its blank window is ready.
+        TerminateProcess(child.hProcess,126);
+        CloseHandle(child.hThread);CloseHandle(child.hProcess);
+        ReleaseMutex(owner);CloseHandle(owner);
+        if(stop)CloseHandle(stop);if(show)CloseHandle(show);if(restart)CloseHandle(restart);
+        startup_trace("host bridge installation failed before startup");return 126;
+    }
     ResumeThread(child.hThread);
+    startup_trace("official host resumed");
     CloseHandle(child.hThread);family[family_count++]=child.dwProcessId;
-    root_pid=child.dwProcessId;BOOL seen_window=FALSE,closing=FALSE;ULONGLONG close_started=0;
+    root_pid=child.dwProcessId;BOOL seen_window=FALSE,closing=FALSE;ULONGLONG close_started=0,started=GetTickCount64();
+    BOOL startup_timeout=FALSE;
+    ULONGLONG next_progress=started+10000;
     while(WaitForSingleObject(child.hProcess,100)==WAIT_TIMEOUT){
+        reap_browser_jobs();
         root_visible=FALSE;EnumWindows(visible_host,0);if(root_visible)seen_window=TRUE;
-        if(!closing && ((seen_window && !root_visible) || (stop && WaitForSingleObject(stop,0)==WAIT_OBJECT_0) || (restart && WaitForSingleObject(restart,0)==WAIT_OBJECT_0))) {
+        if(!root_ready && GetTickCount64()>=next_progress){startup_trace("watchdog active; waiting for first frame");next_progress=GetTickCount64()+10000;}
+        BOOL no_frame=!root_ready && GetTickCount64()-started>90000;
+        if(!closing && ((seen_window && !root_visible) || controller_expired(started) || no_frame || (stop && WaitForSingleObject(stop,0)==WAIT_OBJECT_0) || (restart && WaitForSingleObject(restart,0)==WAIT_OBJECT_0))) {
+            startup_trace(no_frame?"first-frame startup timed out":"closing launcher session");
+            startup_timeout=no_frame;
             closing=TRUE;close_started=GetTickCount64();EnumWindows(close_host,(LPARAM)child.dwProcessId);
         }
         // Give the official launcher time to dispose WebView2 normally. If its
@@ -140,11 +255,12 @@ static int launcher_main(int argc,wchar_t **argv){
             if(!host && (_wcsicmp(entry.szExeFile,L"msedgewebview2.exe") || !contains(family,family_count,entry.th32ParentProcessID)))continue;
             if(!contains(family,family_count,entry.th32ProcessID) && family_count<1024){family[family_count]=entry.th32ProcessID;family_handles[family_count]=OpenProcess(PROCESS_TERMINATE|SYNCHRONIZE,FALSE,entry.th32ProcessID);family_count++;}
             if(contains(injected,injected_count,entry.th32ProcessID))continue;
-            if(attach(entry.th32ProcessID,dll,!host) && injected_count<1024)injected[injected_count++]=entry.th32ProcessID;
+            if(!closing && !host)queue_browser(entry.th32ProcessID,dll);
         }while(Process32NextW(snapshot,&entry));
         CloseHandle(snapshot);
     }
-    WaitForSingleObject(child.hProcess,1000);DWORD status=1;GetExitCodeProcess(child.hProcess,&status);finish_browsers();CloseHandle(child.hProcess);if(stop)CloseHandle(stop);if(show)CloseHandle(show);if(restart)CloseHandle(restart);ReleaseMutex(owner);CloseHandle(owner);return closing?0:(int)status;
+    // Keep the timeout code within Unix's eight-bit exit status across Wine.
+    WaitForSingleObject(child.hProcess,1000);DWORD status=1;GetExitCodeProcess(child.hProcess,&status);finish_browsers();CloseHandle(child.hProcess);if(stop)CloseHandle(stop);if(show)CloseHandle(show);if(restart)CloseHandle(restart);ReleaseMutex(owner);CloseHandle(owner);return startup_timeout?124:closing?0:(int)status;
 }
 
 // A GUI-subsystem helper must not allocate a Wine console. Preserve the CRT's

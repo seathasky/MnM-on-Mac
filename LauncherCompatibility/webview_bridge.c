@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <wchar.h>
 #include <string.h>
+#include "startup_diagnostics.h"
 #define MAX_BYTES (3840*2160*4)
 #define HEADER_BYTES 1024
 #define TIMER_ID 0x4d4e4d
@@ -24,7 +25,7 @@ static int scale_requested;
 #include "game_handoff.h"
 #include "launcher_loading.h"
 #include "launcher_scale.h"
-static void logline(const char *s){OutputDebugStringA(s);}
+static void logline(const char *s){OutputDebugStringA(s);startup_trace(s);}
 static BOOL init_map(void){
     if(frame)return TRUE;
     wchar_t session[48]={0},map_name[128],mutex_name[128];
@@ -45,7 +46,8 @@ static HDC WINAPI bridge_getdc(HWND hwnd){
     wchar_t klass[128]={0},root_class[128]={0};RECT r;
     if(hwnd)GetClassNameW(GetAncestor(hwnd,GA_ROOT),root_class,128);
     if(browser && hwnd && !wcscmp(root_class,L"Tauri Window") && GetClassNameW(hwnd,klass,128) && !wcsncmp(klass,L"Chrome_",7) && GetClientRect(hwnd,&r) && r.right>0 && r.bottom>0 && (ULONGLONG)r.right*r.bottom*4<=MAX_BYTES && init_map()){
-        if(WaitForSingleObject(mutex,2000)==WAIT_OBJECT_0){
+        DWORD acquired=WaitForSingleObject(mutex,2000);
+        if(acquired==WAIT_OBJECT_0 || acquired==WAIT_ABANDONED){
             if(!paint_dc || dc_w!=r.right || dc_h!=r.bottom){
                 if(paint_dc)DeleteDC(paint_dc);
                 if(paint_bitmap)DeleteObject(paint_bitmap);
@@ -64,7 +66,12 @@ static int WINAPI bridge_releasedc(HWND hwnd,HDC dc){
     if(browser && paint_dc && dc==paint_dc){GdiFlush();InterlockedIncrement(&frame->version);InterlockedIncrement(&frame->frames);ReleaseMutex(mutex);return 1;}
     return real_releasedc(hwnd,dc);
 }
-static void CALLBACK present(HWND hwnd,UINT msg,UINT_PTR id,DWORD time){
+static BOOL CALLBACK request_browser_paint(HWND child,LPARAM unused) {
+    WCHAR cls[64];GetClassNameW(child,cls,64);
+    if(!wcsncmp(cls,L"Chrome_",7))RedrawWindow(child,NULL,NULL,RDW_INVALIDATE|RDW_ALLCHILDREN);
+    return TRUE;
+}
+static void present_content(HWND hwnd){
     static LONG seen=-1;
     footer_attach(hwnd);
     footer_read_state();
@@ -74,17 +81,27 @@ static void CALLBACK present(HWND hwnd,UINT msg,UINT_PTR id,DWORD time){
     if(footer_window)SetWindowPos(footer_window,HWND_TOP,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
     loading_update(hwnd);
     if(!init_map())return;
-    if(!frame->width){RedrawWindow(hwnd,NULL,NULL,RDW_INVALIDATE|RDW_ALLCHILDREN);return;}
-    if(frame->version==seen || WaitForSingleObject(mutex,0)!=WAIT_OBJECT_0)return;
+    if(!frame->width){
+        // Injection can miss the first browser paint. Ask for another without
+        // repainting every 33ms or restarting a healthy downloading launcher.
+        static ULONGLONG next_paint;
+        if(GetTickCount64()>=next_paint){next_paint=GetTickCount64()+2000;EnumChildWindows(hwnd,request_browser_paint,0);}
+        return;
+    }
+    if(frame->version==seen)return;
+    DWORD acquired=WaitForSingleObject(mutex,0);
+    if(acquired!=WAIT_OBJECT_0 && acquired!=WAIT_ABANDONED)return;
     LONG w=frame->width,h=frame->height;
     if(w>0 && h>0 && (ULONGLONG)w*h*4<=MAX_BYTES){
         /* Dimensions only: expose rendering scale to scoped compatibility tests. */
         SetPropW(hwnd,L"MnMFrameWidth",(HANDLE)(ULONG_PTR)w);
         SetPropW(hwnd,L"MnMFrameHeight",(HANDLE)(ULONG_PTR)h);
-        if(seen<0)loading_complete();
+        if(seen<0){startup_trace("host received first browser frame");loading_complete();}
         HDC dc=real_getdc(hwnd);
         BITMAPINFO bi={0};bi.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);bi.bmiHeader.biWidth=w;bi.bmiHeader.biHeight=-h;bi.bmiHeader.biPlanes=1;bi.bmiHeader.biBitCount=32;
-        StretchDIBits(dc,0,0,w,h,0,0,w,h,pixels,&bi,DIB_RGB_COLORS,SRCCOPY);
+        RECT destination;
+        bridge_getclientrect(hwnd,&destination);
+        StretchDIBits(dc,0,0,destination.right,destination.bottom,0,0,w,h,pixels,&bi,DIB_RGB_COLORS,SRCCOPY);
         real_releasedc(hwnd,dc);
         if(footer_window) {
             SetWindowPos(footer_window,HWND_TOP,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
@@ -93,6 +110,17 @@ static void CALLBACK present(HWND hwnd,UINT msg,UINT_PTR id,DWORD time){
         if(seen<0){SetForegroundWindow(hwnd);footer_command("ready");}seen=frame->version;
     }
     ReleaseMutex(mutex);
+}
+static void CALLBACK present(HWND hwnd,UINT msg,UINT_PTR id,DWORD time){
+    // GetWindowRect/SetWindowPos and child-window coordinates must agree.
+    // The timer's calling thread can have a different DPI context from Tauri.
+    HMODULE user=GetModuleHandleW(L"user32.dll");
+    HANDLE (WINAPI *getcontext)(HWND)=(void*)GetProcAddress(user,"GetWindowDpiAwarenessContext");
+    HANDLE (WINAPI *setcontext)(HANDLE)=(void*)GetProcAddress(user,"SetThreadDpiAwarenessContext");
+    HANDLE previous=NULL;
+    if(getcontext && setcontext)previous=setcontext(getcontext(hwnd));
+    present_content(hwnd);
+    if(previous)setcontext(previous);
 }
 static HWND WINAPI bridge_create(DWORD ex,LPCWSTR cls,LPCWSTR title,DWORD style,int x,int y,int w,int h,HWND parent,HMENU menu,HINSTANCE inst,LPVOID param){
     HWND hwnd=real_create(ex,cls,title,style,x,y,w,h,parent,menu,inst,param);
@@ -150,7 +178,12 @@ static DWORD WINAPI worker(void *unused){
     BOOL timer=FALSE;
     for(;;){
         if(host){patch_module(GetModuleHandleW(NULL));if(!timer)EnumWindows(find_host,(LPARAM)&timer);}
-        if(browser){patch_module(GetModuleHandleW(L"msedge.dll"));patch_module(GetModuleHandleW(NULL));}
+        if(browser){
+            HMODULE edge=GetModuleHandleW(L"msedge.dll");
+            static BOOL reported_edge;
+            if(edge && !reported_edge){startup_trace("browser paint module loaded");reported_edge=TRUE;}
+            patch_module(edge);patch_module(GetModuleHandleW(NULL));
+        }
         Sleep(100);
     }
     return 0;
@@ -163,7 +196,7 @@ BOOL WINAPI DllMain(HINSTANCE inst,DWORD reason,LPVOID reserved){
         LPCWSTR command=GetCommandLineW();
         browser=!_wcsicmp(base,L"msedgewebview2.exe") && wcsstr(command,L"--webview-exe-name=mnm_launcher.exe")
             && (!wcsstr(command,L"--type=") || wcsstr(command,L"--type=gpu-process"));
-        if(!host && !browser)return TRUE;
+        if(!host && !browser){startup_trace("bridge loaded in non-paint browser process; hooks skipped");return TRUE;}
         HMODULE user=GetModuleHandleW(L"user32.dll");
         real_getdc=(void*)GetProcAddress(user,"GetDC");real_releasedc=(void*)GetProcAddress(user,"ReleaseDC");real_create=(void*)GetProcAddress(user,"CreateWindowExW");
         real_getclientrect=(void*)GetProcAddress(user,"GetClientRect");
@@ -171,6 +204,9 @@ BOOL WINAPI DllMain(HINSTANCE inst,DWORD reason,LPVOID reserved){
         scale_real_getproc=(void*)GetProcAddress(GetModuleHandleW(L"kernel32.dll"),"GetProcAddress");
         DisableThreadLibraryCalls(inst);
         if(host)patch_module(GetModuleHandleW(NULL));
+        // Browser import tables are patched by the worker after the loader lock
+        // is released. Walking/changing Chromium imports inside DLL_PROCESS_ATTACH
+        // races its initialization and can crash the remote loader thread.
         HANDLE t=CreateThread(NULL,0,worker,NULL,0,NULL);if(t)CloseHandle(t);
         logline(host?"MnM GDI bridge: host initialized\n":"MnM GDI bridge: browser initialized\n");
     }

@@ -9,14 +9,16 @@ static WCHAR footer_backend[32]=L"d3dmetal", footer_version[32]=L"2.0.0";
 static WCHAR footer_controls[32768];
 static HFONT footer_font, footer_version_font;
 static BOOL footer_busy, footer_update_available;
+static RECT footer_work_areas[16];
+static int footer_work_count;
 static void footer_read_state(void) {
     static ULONGLONG next;ULONGLONG now=GetTickCount64();if(now<next)return;next=now+250;
     if(!footer_controls[0] || !footer_window)return;
     WCHAR path[32768];if(swprintf(path,32768,L"%ls\\state.txt",footer_controls)<0)return;
     HANDLE file=CreateFileW(path,GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
     if(file==INVALID_HANDLE_VALUE)return;
-    char data[513]={0};DWORD count=0;BOOL read=ReadFile(file,data,512,&count,NULL);CloseHandle(file);
-    if(!read || !count || count>=512)return;
+    char data[2049]={0};DWORD count=0;BOOL read=ReadFile(file,data,2048,&count,NULL);CloseHandle(file);
+    if(!read || !count || count>=2048)return;
     char backend[32]={0},version[32]={0};char *entry=strstr(data,"backend=");
     if(entry && sscanf(entry,"backend=%31[^\n]",backend)==1 && (!strcmp(backend,"metal") || !strcmp(backend,"d3dmetal") || !strcmp(backend,"dxvk")))
         MultiByteToWideChar(CP_UTF8,0,backend,-1,footer_backend,32);
@@ -27,6 +29,14 @@ static void footer_read_state(void) {
     footer_update_available=strstr(data,"update=1\n")!=NULL;
     entry=strstr(data,"scale=");int scale;
     if(entry && sscanf(entry,"scale=%d",&scale)==1 && (scale==0 || scale==60 || scale==70 || scale==80 || scale==90 || scale==100 || scale==125))scale_requested=scale;
+    footer_work_count=0;
+    for(int i=0;i<16;i++) {
+        char key[24];snprintf(key,sizeof(key),"\nwork%d=",i);entry=strstr(data,key);
+        int x,y,width,height;
+        if(!entry || sscanf(entry+strlen(key),"%d,%d,%d,%d",&x,&y,&width,&height)!=4)break;
+        if(x<-100000 || x>100000 || y<-100000 || y>100000 || width<100 || width>32768 || height<100 || height>32768)break;
+        footer_work_areas[footer_work_count++]=(RECT){x,y,x+width,y+height};
+    }
     InvalidateRect(footer_window,NULL,FALSE);
 }
 static BOOL footer_enabled(void) {
@@ -114,8 +124,14 @@ static void footer_button(HDC dc,LPCWSTR text,int left,int right,COLORREF fill,C
     RoundRect(dc,left,49,right,80,10,10);
     SelectObject(dc,oldbrush);SelectObject(dc,oldpen);DeleteObject(brush);DeleteObject(pen);
     BOOL discord=!wcscmp(text,L"Seathasky Dev Discord");
+    BOOL dropdown=!wcscmp(text,L"Wine Config");
     if(discord)footer_discord_logo(dc,left+12,55,color);
-    RECT label={left+(discord?44:8),49,right-8,80};SetTextColor(dc,color);
+    if(dropdown) {
+        HPEN arrow=CreatePen(PS_SOLID,2,color);HGDIOBJ previous=SelectObject(dc,arrow);
+        MoveToEx(dc,right-19,62,NULL);LineTo(dc,right-15,66);LineTo(dc,right-11,62);
+        SelectObject(dc,previous);DeleteObject(arrow);
+    }
+    RECT label={left+(discord?44:8),49,right-(dropdown?25:8),80};SetTextColor(dc,color);
     DrawTextW(dc,text,-1,&label,DT_SINGLELINE|DT_VCENTER|DT_CENTER|DT_NOPREFIX);
 }
 static LRESULT CALLBACK footer_proc(HWND window,UINT message,WPARAM w,LPARAM l) {
@@ -147,6 +163,7 @@ static LRESULT CALLBACK footer_proc(HWND window,UINT message,WPARAM w,LPARAM l) 
         DrawTextW(dc,version,-1,&version_bounds,DT_SINGLELINE|DT_VCENTER|DT_RIGHT|DT_NOPREFIX);
         SelectObject(dc,footer_font);
         footer_button(dc,L"Game Folder",90,220,RGB(45,45,45),RGB(235,235,235));
+        footer_button(dc,L"Wine Config",230,350,RGB(45,45,45),RGB(235,235,235));
         footer_button(dc,L"Seathasky Dev Discord",bounds.right-396,bounds.right-171,RGB(45,45,45),RGB(88,101,242));
         footer_button(dc,L"About",bounds.right-156,bounds.right-88,RGB(45,45,45),RGB(255,140,45));
         footer_button(dc,L"Legal",bounds.right-78,bounds.right-20,RGB(45,45,45),RGB(255,140,45));
@@ -158,6 +175,7 @@ static LRESULT CALLBACK footer_proc(HWND window,UINT message,WPARAM w,LPARAM l) 
         if(y<46 && x>=bounds.right-280 && footer_update_available){footer_command("app-update");return 0;}
         if(y<46 && x<410 && footer_busy)return 0;
         if(y<46 && x>=90 && x<350) {
+            SetForegroundWindow(footer_root);
             HMENU menu=CreatePopupMenu();
             AppendMenuW(menu,MF_STRING|(!wcscmp(footer_backend,L"d3dmetal")?MF_CHECKED:0),1,L"D3DMetal (Recommended)");
             AppendMenuW(menu,MF_STRING|(!wcscmp(footer_backend,L"metal")?MF_CHECKED:0),2,L"DXMT");
@@ -165,10 +183,22 @@ static LRESULT CALLBACK footer_proc(HWND window,UINT message,WPARAM w,LPARAM l) 
             POINT point={MulDiv(90,footer_dpi,96),MulDiv(42,footer_dpi,96)};ClientToScreen(window,&point);
             UINT selected=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_NONOTIFY,point.x,point.y,0,window,NULL);
             DestroyMenu(menu);
+            PostMessageW(footer_root,WM_NULL,0,0);
             if(selected)footer_command(selected==1?"graphics:d3dmetal":selected==2?"graphics:metal":"graphics:dxvk");
         } else if(y<46 && x>=360 && x<410)footer_command("options");
         else if(y>=49 && y<80 && x>=bounds.right-396 && x<bounds.right-171)footer_command("discord");
         else if(y>=49 && y<80 && x>=90 && x<220)footer_command("game-folder");
+        else if(y>=49 && y<80 && x>=230 && x<350) {
+            SetForegroundWindow(footer_root);
+            HMENU menu=CreatePopupMenu();
+            AppendMenuW(menu,MF_STRING,1,L"Wine Config");
+            AppendMenuW(menu,MF_STRING,2,L"Open Registry");
+            POINT point={MulDiv(230,footer_dpi,96),MulDiv(80,footer_dpi,96)};ClientToScreen(window,&point);
+            UINT selected=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_NONOTIFY,point.x,point.y,0,window,NULL);
+            DestroyMenu(menu);
+            PostMessageW(footer_root,WM_NULL,0,0);
+            if(selected)footer_command(selected==1?"wine-config":"wine-registry");
+        }
         else if(y>=49 && y<80 && x>=bounds.right-156 && x<bounds.right-88)footer_command("about");
         else if(y>=49 && y<80 && x>=bounds.right-78 && x<bounds.right-20)footer_command("legal");
         return 0;
@@ -180,6 +210,8 @@ static void footer_attach(HWND root) {
     RECT client,outer;if(!real_getclientrect(root,&client) || !GetWindowRect(root,&outer))return;
     UINT (WINAPI *getdpi)(HWND)=(void*)GetProcAddress(GetModuleHandleW(L"user32.dll"),"GetDpiForWindow");
     footer_dpi=getdpi?getdpi(root):96;if(footer_dpi<96 || footer_dpi>384)footer_dpi=96;
+    // Use the window's coordinate DPI, not the display's backing-pixel ratio.
+    // A DPI-unaware Wine window can use 96-DPI coordinates on Retina.
     int reserved=MulDiv(FOOTER_HEIGHT,footer_dpi,96);
     WNDCLASSW klass={0};klass.lpfnWndProc=footer_proc;klass.hInstance=GetModuleHandleW(NULL);
     klass.hCursor=LoadCursorW(NULL,IDC_ARROW);klass.lpszClassName=L"MnMMacControls";
@@ -191,9 +223,10 @@ static void footer_attach(HWND root) {
     GetEnvironmentVariableW(L"MNM_WEBVIEW_CONTROL_DIR",footer_controls,32768);
     SetPropW(root,L"MnMMacFooterHeight",(HANDLE)(ULONG_PTR)reserved);
     footer_root=root;
-    SetWindowPos(root,NULL,0,0,outer.right-outer.left,outer.bottom-outer.top+reserved,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+    SetWindowPos(root,HWND_NOTOPMOST,0,0,outer.right-outer.left,outer.bottom-outer.top+reserved,SWP_NOMOVE|SWP_NOACTIVATE);
     footer_window=real_create(0,L"MnMMacControls",L"MnM on Mac controls",WS_CHILD|WS_VISIBLE,
         0,client.bottom,client.right,reserved,root,NULL,klass.hInstance,NULL);
+    if(footer_window)footer_command("opened");
     if(!footer_window)RemovePropW(root,L"MnMMacFooterHeight");
 }
 static BOOL WINAPI bridge_getclientrect(HWND hwnd,LPRECT bounds) {

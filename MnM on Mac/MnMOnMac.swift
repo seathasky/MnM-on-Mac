@@ -7,6 +7,43 @@
 
 import AppKit
 
+extension NSWindow {
+    func mnmBringToFront() {
+        level = .normal
+        hidesOnDeactivate = false
+        NSApp.activate(ignoringOtherApps: true)
+        if isMiniaturized { deminiaturize(nil) }
+        makeKeyAndOrderFront(nil)
+        orderFrontRegardless()
+        // Activation completes asynchronously when focus comes from Wine or
+        // another app. Finish ordering once that handoff has been processed.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.isVisible else { return }
+            self.makeKeyAndOrderFront(nil)
+        }
+    }
+}
+
+private extension NSAlert {
+    @discardableResult
+    func runForegroundModal() -> NSApplication.ModalResponse {
+        window.hidesOnDeactivate = false
+        NSApp.activate(ignoringOtherApps: true)
+        window.orderFrontRegardless()
+        return runModal()
+    }
+}
+
+private extension NSOpenPanel {
+    @discardableResult
+    func runForegroundModal() -> NSApplication.ModalResponse {
+        hidesOnDeactivate = false
+        NSApp.activate(ignoringOtherApps: true)
+        orderFrontRegardless()
+        return runModal()
+    }
+}
+
 private struct GitHubRelease: Decodable {
     let tagName: String
     let htmlURL: URL
@@ -224,6 +261,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     private var updateButton: NSButton!
     private var reauthenticateButton: NSButton!
     private var folderButton: NSButton!
+    private var wineToolProcesses: [String: Process] = [:]
     private var setupLogButton: NSButton!
     private var fileActions: NSStackView!
     private var accountActions: NSStackView!
@@ -268,6 +306,8 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     private var officialControlsTimer: Timer?
     private var officialGameTicket: String?
     private var footerMenuRequest = false
+    private var officialMenuOpen = false
+    private var launcherStartupRetries = 0
     private var compactSetupWindow: CompactSetupWindow?
     private var usesOfficialLauncher: Bool { true }
 
@@ -337,16 +377,22 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         try? controls.writeState(version: installedAppVersion(), backend: selectedGraphicsBackend,
                                  busy: busy || GameRunState.isRunning(.current), updateAvailable: availableReleaseURL != nil,
                                  launcherScale: UserDefaults.standard.integer(forKey: Self.launcherScaleKey))
-        guard NSApp.modalWindow == nil else { return }
+        guard !officialMenuOpen, NSApp.modalWindow == nil else { return }
         for action in controls.takeActions() {
             switch action {
+            case .opened:
+                bringOfficialLauncherForward()
             case .ready:
+                launcherStartupRetries = 0
                 window.orderOut(nil)
                 compactSetupWindow?.window.orderOut(nil)
+                bringOfficialLauncherForward()
             case .discord: openDevDiscord()
             case .updates: openUpdatesWebsite()
             case .about: showThirdPartySoftware()
             case .gameFolder: openInstallDirectory()
+            case .wineConfig: openWineTool("winecfg.exe")
+            case .wineRegistry: openWineTool("regedit.exe")
             case .legal: showLegalExplanation()
             case .options:
                 footerMenuRequest = true
@@ -912,7 +958,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         alert.informativeText = "MnM on Mac \(version) is ready to install. The app will close briefly, replace the current version, and reopen automatically."
         alert.addButton(withTitle: "Install Update")
         alert.addButton(withTitle: "Later")
-        if alert.runModal() == .alertFirstButtonReturn { installAvailableUpdate() }
+        if alert.runForegroundModal() == .alertFirstButtonReturn { installAvailableUpdate() }
     }
 
     private func installAvailableUpdate() {
@@ -957,7 +1003,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         task.resume()
         // The official main window belongs to Wine, so a native sheet attached
         // to our hidden setup window would be invisible.
-        let response = alert.runModal()
+        let response = alert.runForegroundModal()
         acceptingResult = false
         alert.window.orderOut(nil)
         if response == .alertFirstButtonReturn {
@@ -1016,7 +1062,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             let failure = NSAlert()
             failure.messageText = "Update Failed"
             failure.informativeText = error.localizedDescription
-            failure.runModal()
+            failure.runForegroundModal()
         }
     }
 
@@ -1269,14 +1315,14 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         alert.informativeText = "Game Mode requires Apple’s full Xcode app. Would you like to download Xcode now?"
         alert.addButton(withTitle: "Yes, Download Xcode")
         alert.addButton(withTitle: "Turn Game Mode Off")
-        if alert.runModal() == .alertFirstButtonReturn {
+        if alert.runForegroundModal() == .alertFirstButtonReturn {
             let next = NSAlert()
             next.alertStyle = .warning
             next.messageText = "Restart MnM on Mac After Installing Xcode"
             next.informativeText = "Download Xcode from the App Store, open it once, and accept its license if prompted. Then quit and restart MnM on Mac so Game Mode can use it."
             next.addButton(withTitle: "Open Xcode in App Store")
             next.addButton(withTitle: "Close")
-            if next.runModal() == .alertFirstButtonReturn {
+            if next.runForegroundModal() == .alertFirstButtonReturn {
                 NSWorkspace.shared.open(URL(string: "macappstore://itunes.apple.com/app/id497799835")!)
             }
         } else {
@@ -1335,7 +1381,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             alert.addButton(withTitle: "Cancel")
             alert.addButton(withTitle: "View License")
             while true {
-                switch alert.runModal() {
+                switch alert.runForegroundModal() {
                 case .alertFirstButtonReturn: return true
                 case .alertThirdButtonReturn:
                     NSWorkspace.shared.open(URL(string: "https://www.apple.com/legal/sla/")!)
@@ -1592,8 +1638,16 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         note.isEnabled = false
         menu.addItem(note)
         if footerMenuRequest {
+            guard !officialMenuOpen else { return }
+            let location = NSEvent.mouseLocation
+            officialMenuOpen = true
             NSApp.activate(ignoringOtherApps: true)
-            menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                guard let self = self else { return }
+                defer { self.officialMenuOpen = false }
+                guard self.patcherProcess?.isRunning == true else { return }
+                menu.popUp(positioning: nil, at: location, in: nil)
+            }
         } else {
             menu.popUp(positioning: item, at: NSPoint(x: sender.bounds.midX, y: sender.bounds.maxY + 4), in: sender)
         }
@@ -1636,7 +1690,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             alert.informativeText = "Terminal Log is intended for debugging Wine. It opens a live Terminal window and may noticeably reduce game performance while enabled."
             alert.addButton(withTitle: "Enable")
             alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            guard alert.runForegroundModal() == .alertFirstButtonReturn else { return }
         }
         UserDefaults.standard.set(!terminalLogEnabled, forKey: Self.terminalLogKey)
         updatePerformanceHUDButtonAppearance()
@@ -1681,7 +1735,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
                 alert.addButton(withTitle: "I Agree & Install")
             }
             alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else {
+            guard alert.runForegroundModal() == .alertFirstButtonReturn else {
                 graphicsBackendButton.selectItem(at: 1)
                 UserDefaults.standard.set(GraphicsBackend.metal.rawValue, forKey: Self.graphicsBackendKey)
                 updatePerformanceHUDButtonAppearance()
@@ -1788,9 +1842,62 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     }
 
     @objc private func update() {
+        launcherStartupRetries = 0
+        updateLauncher()
+    }
+
+    private func bringOfficialLauncherForward() {
+        guard let process = patcherProcess, process.isRunning else { return }
+        if compactSetupWindow?.window.isVisible == true {
+            compactSetupWindow?.show(force: true)
+            return
+        }
+        let installer = WindowsPatcherInstaller()
+        installer.requestShow(process)
+        // Wine's helper PID isn't the macOS process owning the launcher window.
+        // Identify its actual window owner, scoped to our PRIVATE launcher
+        // engine; never activate another Wine bottle or the game environment.
+        let enginePath = installer.engine.standardizedFileURL.path + "/"
+        for delay in [0.0, 0.15, 0.5] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak process] in
+                guard let self = self, let process = process,
+                      self.patcherProcess === process, process.isRunning,
+                      !self.officialMenuOpen, NSApp.modalWindow == nil,
+                      self.compactSetupWindow?.window.isVisible != true,
+                      self.thirdPartyWindow?.isVisible != true else { return }
+                guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+                        as? [[String: Any]] else { return }
+                for info in windows {
+                    guard let owner = info[kCGWindowOwnerPID as String] as? NSNumber,
+                          let app = NSRunningApplication(processIdentifier: owner.int32Value),
+                          let executable = app.executableURL,
+                          executable.standardizedFileURL.path.hasPrefix(enginePath),
+                          !app.isTerminated, app.activationPolicy != .prohibited else { continue }
+                    // macOS 14+ supports a cooperative handoff. Activating our
+                    // controller alone leaves Xcode in front of Wine's window.
+                    if app.isActive { return }
+                    NSApp.activate(ignoringOtherApps: true)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self, weak process] in
+                        guard let self = self, let process = process,
+                              self.patcherProcess === process, process.isRunning,
+                              !app.isTerminated, !self.officialMenuOpen,
+                              self.compactSetupWindow?.window.isVisible != true,
+                              NSApp.modalWindow == nil, self.thirdPartyWindow?.isVisible != true else { return }
+                        NSApp.yieldActivation(to: app)
+                        _ = app.unhide()
+                        _ = app.activate(from: .current, options: [.activateAllWindows])
+                    }
+                    return
+                }
+            }
+        }
+    }
+
+    private func updateLauncher() {
+        let preparationStarted = ProcessInfo.processInfo.systemUptime
         guard !busy, storageFailure == nil, gameProcess?.isRunning != true, !GameRunState.isRunning(.current) else { return }
         if let patcher = patcherProcess, patcher.isRunning {
-            NSRunningApplication(processIdentifier: patcher.processIdentifier)?.activate(options: [])
+            bringOfficialLauncherForward()
             return
         }
         let otherPatchers = NSRunningApplication.runningApplications(withBundleIdentifier: "com.monstersandmemories.mnm-patcher-app")
@@ -1821,7 +1928,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 try installer.prepareLaunch()
-                DispatchQueue.main.async { self.startPreparedLauncher(installer) }
+                DispatchQueue.main.async { self.startPreparedLauncher(installer, preparationStarted: preparationStarted) }
             } catch {
                 DispatchQueue.main.async {
                     self.busy = false
@@ -1832,12 +1939,13 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         }
     }
 
-    private func startPreparedLauncher(_ installer: WindowsPatcherInstaller) {
+    private func startPreparedLauncher(_ installer: WindowsPatcherInstaller, preparationStarted: TimeInterval) {
         defer { busy = false; refresh() }
         do {
             if usesOfficialLauncher { officialControls = try WindowsLauncherControls() }
             let process = try installer.makeProcess(controlsDirectory: officialControls?.directory,
-                                                   graphicsBackend: selectedGraphicsBackend, appVersion: installedAppVersion())
+                                                   graphicsBackend: selectedGraphicsBackend, appVersion: installedAppVersion(),
+                                                   preparationStarted: preparationStarted)
             process.terminationHandler = { [weak self] finished in
                 DispatchQueue.main.async {
                     guard let self = self, self.patcherProcess === finished else { return }
@@ -1848,8 +1956,22 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
                     self.closePatcherAfterInitialSetup = false
                     self.patcherReadyChecks = 0
                     self.expectedPatcherTermination = false
+                    // The helper bounds first-frame startup, closes only its
+                    // launcher family, and reports portable timeout status 124.
+                    if !expectedTermination && finished.terminationStatus == 124,
+                       self.launcherStartupRetries < 1, !GameRunState.isRunning(.current) {
+                        self.launcherStartupRetries += 1
+                        self.lastPatcherFailure = nil
+                        self.statusLabel.stringValue = "Restarting the official launcher…"
+                        self.compactSetupWindow?.show()
+                        self.refresh()
+                        DispatchQueue.main.async { self.updateLauncher() }
+                        return
+                    }
                     if !expectedTermination && finished.terminationStatus != 0 {
-                        self.lastPatcherFailure = "The official launcher stopped (code \(finished.terminationStatus)). Reopen it and try again."
+                        self.lastPatcherFailure = finished.terminationStatus == 124
+                            ? "The official launcher did not finish loading after a restart. Choose Try Again to reopen it."
+                            : "The official launcher stopped (code \(finished.terminationStatus)). Reopen it and try again."
                     }
                     self.refresh()
                     if self.usesOfficialLauncher {
@@ -1926,7 +2048,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         picker.canChooseDirectories = true
         picker.canChooseFiles = false
         picker.allowsMultipleSelection = false
-        guard picker.runModal() == .OK, let folder = picker.url else { return }
+        guard picker.runForegroundModal() == .OK, let folder = picker.url else { return }
         let result = runHelper(["remember-game", folder.path])
         if result.code != 0 { showError(result.text) }
         refresh()
@@ -1941,7 +2063,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         alert.addButton(withTitle: "Reset and Reinstall")
         alert.addButton(withTitle: "Choose Existing Game Folder…")
         alert.addButton(withTitle: "Cancel")
-        switch alert.runModal() {
+        switch alert.runForegroundModal() {
         case .alertFirstButtonReturn:
             do {
                 try AppStorage.resetLauncherState(database: GameSession.launcherDatabase, resetInstallation: true)
@@ -1977,7 +2099,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         alert.accessoryView = warning
         alert.addButton(withTitle: "Re-authenticate")
         alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard alert.runForegroundModal() == .alertFirstButtonReturn else { return }
         do {
             try AppStorage.resetLauncherState(database: GameSession.launcherDatabase)
             lastPatcherFailure = nil
@@ -1985,6 +2107,50 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             update()
         } catch {
             showError("The old login data could not be backed up: \(error.localizedDescription)")
+        }
+    }
+
+    private func openWineTool(_ tool: String) {
+        guard tool == "winecfg.exe" || tool == "regedit.exe" else { return }
+        if let failure = storageFailure { showError(failure); return }
+        guard !busy, !GameRunState.isRunning(.current), gameProcess?.isRunning != true else {
+            showError("Close the game and let setup finish before changing Wine settings.")
+            return
+        }
+        if let existing = wineToolProcesses[tool], existing.isRunning {
+            NSRunningApplication(processIdentifier: existing.processIdentifier)?.activate(options: [])
+            return
+        }
+        let paths = WinePaths.current
+        guard let wine = paths.wine else { showError("Set up Wine before opening its settings."); return }
+        let environment = WineRuntime.environment(paths: paths, graphicsBackend: selectedGraphicsBackend,
+                                                  msyncEnabled: msyncEnabled)
+        guard let prefix = environment["WINEPREFIX"],
+              FileManager.default.fileExists(atPath: prefix + "/system.reg") else {
+            showError("The selected graphics engine's Wine environment is not ready. Launch the game once to prepare it, then open Wine Config.")
+            return
+        }
+        let process = Process()
+        process.executableURL = wine
+        process.arguments = [tool]
+        process.environment = environment
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { [weak self] finished in
+            DispatchQueue.main.async {
+                guard let self = self, self.wineToolProcesses[tool] === finished else { return }
+                self.wineToolProcesses.removeValue(forKey: tool)
+                if finished.terminationStatus != 0 {
+                    self.showError("The Wine settings tool stopped (code \(finished.terminationStatus)).")
+                }
+            }
+        }
+        do {
+            try process.run()
+            wineToolProcesses[tool] = process
+        } catch {
+            showError("Wine settings could not open: \(error.localizedDescription)")
         }
     }
 
@@ -2012,8 +2178,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
 
     @objc private func showThirdPartySoftware() {
         if thirdPartyWindow == nil { thirdPartyWindow = makeThirdPartyWindow() }
-        thirdPartyWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        thirdPartyWindow?.mnmBringToFront()
     }
 
     @objc private func showLegalExplanation() {
@@ -2024,7 +2189,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         alert.addButton(withTitle: "Done")
         alert.addButton(withTitle: "View Master User Agreement")
         if usesOfficialLauncher {
-            if alert.runModal() == .alertSecondButtonReturn { NSWorkspace.shared.open(Self.masterUserAgreementURL) }
+            if alert.runForegroundModal() == .alertSecondButtonReturn { NSWorkspace.shared.open(Self.masterUserAgreementURL) }
             return
         }
         alert.beginSheetModal(for: window) { response in
@@ -2144,7 +2309,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         alert.alertStyle = .warning
         alert.messageText = "MnM on Mac"
         alert.informativeText = message
-        alert.runModal()
+        alert.runForegroundModal()
     }
 
     func applicationDidBecomeActive(_ notification: Notification) { refresh() }
@@ -2166,9 +2331,9 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if usesOfficialLauncher {
             if let launcher = patcherProcess, launcher.isRunning {
-                WindowsPatcherInstaller().requestShow(launcher)
+                bringOfficialLauncherForward()
             } else if !GameRunState.isRunning(.current) {
-                compactSetupWindow?.show()
+                compactSetupWindow?.show(force: true)
                 update()
             }
             return true

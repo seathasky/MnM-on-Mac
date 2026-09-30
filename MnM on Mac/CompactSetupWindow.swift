@@ -14,6 +14,8 @@ final class CompactSetupWindow {
                           styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "MnM on Mac — Setup"
         window.isReleasedWhenClosed = false
+        window.level = .normal
+        window.hidesOnDeactivate = false
         let title = NSTextField(labelWithString: "MnM on Mac")
         title.font = .systemFont(ofSize: 22, weight: .semibold)
         let subtitle = NSTextField(labelWithString: "Preparing Monsters & Memories for your Mac")
@@ -54,7 +56,12 @@ final class CompactSetupWindow {
         window.center()
     }
 
-    func show() { window.makeKeyAndOrderFront(nil) }
+    func show(force: Bool = false) {
+        // Refresh calls this repeatedly while setup/error UI is visible. Bring
+        // it forward when it opens, not every tick after the user switches apps.
+        guard force || !window.isVisible || window.isMiniaturized else { return }
+        window.mnmBringToFront()
+    }
     func render(message: String, explanation: String, failed: Bool) {
         status.stringValue = message
         detail.stringValue = explanation

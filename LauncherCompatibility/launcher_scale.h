@@ -2,6 +2,7 @@
  * 1.0.3650.58 (ICoreWebView2Environment / ICoreWebView2Controller).
  * No script injection, browser debug port, or changes to the official EXE.
  */
+#include "launcher_fit.h"
 static void patch_slot(void **slot,void *value);
 static FARPROC (WINAPI *scale_real_getproc)(HMODULE,LPCSTR);
 static void *scale_controller;
@@ -48,6 +49,8 @@ static HRESULT WINAPI scale_create_controller(void *environment,HWND parent,void
     HRESULT result=scale_real_controller(environment,parent,proxy);scale_callback_release(proxy);return result;
 }
 static HRESULT WINAPI scale_callback_invoke(SCALE_CALLBACK *self,HRESULT error,void *object) {
+    startup_trace(self->environment ? (SUCCEEDED(error)?"WebView environment callback succeeded":"WebView environment callback failed")
+                                   : (SUCCEEDED(error)?"WebView controller callback succeeded":"WebView controller callback failed"));
     if(SUCCEEDED(error) && object) {
         if(self->environment) {
             void **table=scale_table(object);
@@ -60,7 +63,7 @@ static HRESULT WINAPI scale_callback_invoke(SCALE_CALLBACK *self,HRESULT error,v
                 if(options_table[21]!=(void*)scale_create_options){scale_real_options=(void*)options_table[21];patch_slot(&options_table[21],scale_create_options);}
                 scale_release(extended);
             }
-        } else if(!scale_controller){scale_addref(object);scale_controller=object;}
+        } else if(!scale_controller){scale_addref(object);scale_controller=object;startup_trace("WebView controller captured");}
     }
     return ((HRESULT(WINAPI*)(void*,HRESULT,void*))scale_table(self->original)[3])(self->original,error,object);
 }
@@ -96,40 +99,63 @@ static void scale_update(HWND root) {
     SetPropW(root,L"MnMScaleController",(HANDLE)(ULONG_PTR)(scale_controller!=NULL));
     if(!footer_window)return;
     if(!scale_base_width) {
-        RECT area;real_getclientrect(root,&area);
-        scale_base_dpi=footer_dpi;scale_base_width=area.right;
-        scale_base_height=area.bottom-MulDiv(FOOTER_HEIGHT,scale_base_dpi,96);
+        // Stable design size, not a size restored by the official launcher.
+        // Otherwise each reopen can shrink an already scaled window again.
+        scale_base_dpi=footer_dpi;
+        scale_base_width=MulDiv(970,scale_base_dpi,96);
+        scale_base_height=MulDiv(700,scale_base_dpi,96);
         scale_original_proc=(WNDPROC)SetWindowLongPtrW(root,GWLP_WNDPROC,(LONG_PTR)scale_host_proc);
     }
     MONITORINFO monitor={sizeof(monitor)};
     if(!GetMonitorInfoW(MonitorFromWindow(root,MONITOR_DEFAULTTONEAREST),&monitor))return;
     RECT outer,client;GetWindowRect(root,&outer);real_getclientrect(root,&client);
+    // Wine can keep the old monitor work area after a macOS resolution change.
+    // Native screen rectangles are live and share this prefix's 96-DPI units.
+    if(footer_work_count && scale_base_dpi==96) {
+        LONGLONG best=-1;int selected=0;
+        for(int i=0;i<footer_work_count;i++) {
+            RECT overlap;
+            LONGLONG area=IntersectRect(&overlap,&outer,&footer_work_areas[i])
+                ?(LONGLONG)(overlap.right-overlap.left)*(overlap.bottom-overlap.top):0;
+            if(area>best){best=area;selected=i;}
+        }
+        monitor.rcWork=footer_work_areas[selected];
+    }
     int borderw=outer.right-outer.left-client.right,borderh=outer.bottom-outer.top-client.bottom;
     int margin=MulDiv(20,scale_base_dpi,96);
     int workw=monitor.rcWork.right-monitor.rcWork.left,workh=monitor.rcWork.bottom-monitor.rcWork.top;
-    int fitw=(workw-margin-borderw)*100/scale_base_width;
-    int fith=(workh-margin-borderh)*100/(scale_base_height+MulDiv(FOOTER_HEIGHT,scale_base_dpi,96));
-    int percent=scale_requested?scale_requested:80;
-    if(percent>fitw)percent=fitw;if(percent>fith)percent=fith;
-    if(percent<10)percent=10;if(percent>125)percent=125;
-    if(percent==scale_applied && scale_zoom_applied==scale_controller)return;
+    int percent=launcher_fit_percent(scale_requested,scale_base_width,scale_base_height,
+        MulDiv(FOOTER_HEIGHT,scale_base_dpi,96),workw,workh,borderw,borderh,margin);
     int width=MulDiv(scale_base_width,percent,100),height=MulDiv(scale_base_height,percent,100);
     UINT dpi=MulDiv(scale_base_dpi,percent,100);int footer=MulDiv(FOOTER_HEIGHT,dpi,96);
-    RECT bounds={0,0,width,height};
-    if(scale_controller) {
-        HRESULT result=((HRESULT(WINAPI*)(void*,RECT,double))scale_table(scale_controller)[11])(scale_controller,bounds,percent/100.0);
-        if(FAILED(result))return;
-    }
-    footer_dpi=dpi;SetPropW(root,L"MnMMacFooterHeight",(HANDLE)(ULONG_PTR)footer);
     int x=outer.left,y=outer.top;
     if(x+width+borderw>monitor.rcWork.right)x=monitor.rcWork.right-width-borderw;
     if(y+height+footer+borderh>monitor.rcWork.bottom)y=monitor.rcWork.bottom-height-footer-borderh;
     if(x<monitor.rcWork.left)x=monitor.rcWork.left;if(y<monitor.rcWork.top)y=monitor.rcWork.top;
+    if(percent==scale_applied && scale_zoom_applied==scale_controller
+       && client.right==width && client.bottom==height+footer
+       && x==outer.left && y==outer.top)return;
+    RECT bounds={0,0,width,height};
+    if(scale_controller) {
+        HRESULT result=((HRESULT(WINAPI*)(void*,RECT,double))scale_table(scale_controller)[11])(scale_controller,bounds,percent/100.0);
+        if(FAILED(result)){
+            static BOOL reported;
+            if(!reported){char detail[96];snprintf(detail,sizeof(detail),"WebView sizing failed HRESULT=%08lx",(unsigned long)result);startup_trace(detail);reported=TRUE;}
+            return;
+        }
+    }
+    footer_dpi=dpi;SetPropW(root,L"MnMMacFooterHeight",(HANDLE)(ULONG_PTR)footer);
     SetWindowPos(root,NULL,x,y,width+borderw,height+footer+borderh,SWP_NOZORDER|SWP_NOACTIVATE);
+    // Re-read the actual client after resizing: do not pass guessed bounds to
+    // WebView2 or leave the footer at half-size when Wine virtualizes chrome.
+    real_getclientrect(root,&client);
+    width=client.right;height=client.bottom-footer;
+    bounds.right=width;bounds.bottom=height;
     SetWindowPos(footer_window,HWND_TOP,0,height,width,footer,SWP_NOACTIVATE);
     // Reapply after WM_SIZE so the official host's resize handler cannot reset zoom.
     if(scale_controller)((HRESULT(WINAPI*)(void*,RECT,double))scale_table(scale_controller)[11])(scale_controller,bounds,percent/100.0);
     scale_zoom_applied=scale_controller;
     scale_applied=percent;SetPropW(root,L"MnMLauncherScale",(HANDLE)(ULONG_PTR)percent);
+    char detail[180];snprintf(detail,sizeof(detail),"launcher layout dpi=%u scale=%d client=%ldx%ld web=%dx%d footer=%d",scale_base_dpi,percent,client.right,client.bottom,width,height,footer);startup_trace(detail);
     RedrawWindow(root,NULL,NULL,RDW_INVALIDATE|RDW_ALLCHILDREN);
 }
