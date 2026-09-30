@@ -1,71 +1,57 @@
 # MnM on Mac
 
-![MnM on Mac](https://i.imgur.com/yWviL69.png)
+![MnM on Mac](https://raw.githubusercontent.com/seathasky/MnM-on-Mac/refs/heads/main/Preview.png)
 
-MnM on Mac is an independent community launcher for installing, updating, and playing [Monsters & Memories](https://monstersandmemories.com/) on macOS.
+MnM on Mac is an independent community app for playing [Monsters & Memories](https://monstersandmemories.com/) on macOS.
 
-The app prepares a self-contained Windows environment using Wine, so no separate CrossOver installation is required. The official Monsters & Memories launcher handles signing in, installation, and updates. After setup, MnM on Mac can launch the game directly.
+The app sets up a self-contained Wine environment...no CrossOver installation required. Version 2.0 uses the official launcher for signing in, installing, updating, repairing, and playing, with Mac controls attached beneath its window.
 
-> **Beta:** MnM on Mac is still being tested. Back up anything important and report problems through GitHub Issues.
+> **Beta:** Report problems through [GitHub Issues](https://github.com/seathasky/MnM-on-Mac/issues) or [Seathasky Dev Discord](https://discord.gg/9w6ZdaksDX).
 
 ## Features
 
-- Native macOS interface with Apple silicon support
-- Guided Wine and game setup
-- Direct game launching after the initial installation
-- Access to the official launcher for login, updates, and repairs
-- Custom game-folder selection
-- Graphics Engine selection including D3DMetal, DXMT and DXVK.
-- MetalFX Upscaling.
-- MacOS Game Mode.
-- Developer ID signed and notarized by Apple
+- Apple silicon support and guided setup
+- D3DMetal, DXMT, and DXVK graphics options
+- MetalFX Upscaling with DXMT
+- macOS Game Mode controls, where supported
+- Automatic screen-fit sizing with live launcher scaling
+- Game Folder, Discord, About, and Legal buttons
+- Built-in app update checks
 
 ## Installation
 
 1. Download the latest build from [Releases](https://github.com/seathasky/MnM-on-Mac/releases).
-2. Move **MnM on Mac.app** to your Applications folder.
-3. Open the app and select **Set Up Wine**.
-4. Sign in and install the game through the official launcher when prompted.
-5. Return to MnM on Mac and use **Play** for normal launches.
+2. Move **MnM on Mac.app** to Applications and open it.
+3. Follow setup prompts, including Rosetta installation if required.
+4. Sign in, install, and play through the official launcher.
 
-The first setup downloads Wine and its support files, so it may take several minutes.
+**First-time setup can take 5–15 minutes, depending on your Mac and internet speed.** Downloading the game may take additional time.
 
-## Updating the Game
+## Controls & Updates
 
-Select **Install /Update / Login** to open the official Monsters & Memories launcher. Let it finish updating, close it, and return to MnM on Mac.
+Use the attached footer for graphics selection and game-folder access. The cogwheel includes launcher scaling and performance settings.
+
+The official launcher handles the game. MnM on Mac checks for app updates separately.
 
 ## Troubleshooting
 
-### Rosetta Is Not Installed
+- **Window too large:** Cogwheel → Launcher Scale → Automatic (Fit Screen).
+- **Loading screen stuck:** Quit MnM on Mac completely and reopen it.
+- **Sign-in problems:** Tools → Re-authenticate…
+- **Missing game files:** Tools → Choose Game Folder… and select the folder containing `mnm.exe`.
 
-If **Set Up Wine** is grayed out, Rosetta may not be installed. Install it from Terminal:
+Application support files and logs are stored in:
 
-```terminal
-softwareupdate --install-rosetta --agree-to-license
-```
+    ~/Library/Application Support/MnM on Mac
 
-### Re-authenticate
-
-If the game asks you to re-authenticate, select **Re-authenticate…** in MnM on Mac. This resets and backs up the official launcher's saved login session without deleting the installed game. Sign in again through the official launcher afterward.
-
-### Game Files Not Found
-
-Select **Choose Game Folder…** and choose the folder that directly contains `mnm.exe`.
-
-Application data is stored in:
-
-```text
-~/Library/Application Support/MnM on Mac
-```
+Use **Game Folder** to locate the game installation.
 
 ## Credits
 
-Monsters & Memories and its artwork are created by the official Monsters & Memories development team. Visit the [official website](https://monstersandmemories.com/) to learn more.
+Monsters & Memories and its artwork belong to the official development team. MnM on Mac is not affiliated with or endorsed by them.
 
-MnM on Mac uses open-source work from the WineHQ, Sikarugir, DXMT, and wine-msync contributors. Full acknowledgements and licenses are available inside the app.
-
-MnM on Mac is an independent community project and is not affiliated with or endorsed by the Monsters & Memories team.
+Built with work from WineHQ, Sikarugir, DXMT, and wine-msync contributors. Full acknowledgements and licenses are available inside the app.
 
 ## License
 
-MnM on Mac source code is available under the [MIT License](LICENSE). Third-party components remain subject to their respective licenses.
+Source code is available under the [MIT License](LICENSE). Third-party components retain their respective licenses.
