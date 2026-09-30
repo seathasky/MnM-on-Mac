@@ -12,6 +12,10 @@ enum AppStorage {
     static let legacyName = "MnM on Mac Wine"
     static var applicationSupport: URL {
         #if DEBUG
+        if Bundle.main.bundleURL.path.hasPrefix("/private/tmp/mnm-updater-test-") {
+            return Bundle.main.bundleURL.deletingLastPathComponent()
+                .appendingPathComponent("TestData", isDirectory: true)
+        }
         if let test = ProcessInfo.processInfo.environment["MNM_TEST_APPLICATION_SUPPORT"],
            test.hasPrefix("/private/tmp/mnm-"), !test.contains("..") {
             return URL(fileURLWithPath: test, isDirectory: true)

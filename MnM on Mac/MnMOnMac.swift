@@ -284,6 +284,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     private var availableAppVersion: String?
     private var updatePromptShown = false
     private var installingAppUpdate = false
+    private var checkingAppUpdate = false
     private var state = ""
     private var busy = false
     private var patcherProcess: Process?
@@ -310,6 +311,18 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     private var launcherStartupRetries = 0
     private var compactSetupWindow: CompactSetupWindow?
     private var usesOfficialLauncher: Bool { true }
+    private var isolatedUpdaterTest: Bool {
+        #if DEBUG
+        if Bundle.main.bundleURL.path.hasPrefix("/private/tmp/mnm-updater-test-") {
+            return true
+        }
+        return ProcessInfo.processInfo.environment["MNM_TEST_UPDATER_ONLY"] == "1"
+            && AppStorage.applicationSupport.path.hasPrefix("/private/tmp/mnm-")
+            && Bundle.main.bundleURL.path.hasPrefix("/private/tmp/mnm-")
+        #else
+        return false
+        #endif
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
@@ -338,14 +351,16 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         if !usesOfficialLauncher && !UserDefaults.standard.bool(forKey: Self.hideWelcomeKey) {
             DispatchQueue.main.async { [weak self] in self?.showWelcomeExplanation() }
         }
-        checkForAppUpdate()
+        checkingAppUpdate = usesOfficialLauncher
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.refresh() }
         #if DEBUG
         // Exercise the normal button action against isolated test storage,
         // without automating the desktop or touching a user's installation.
         if AppStorage.applicationSupport.path.hasPrefix("/private/tmp/mnm-"),
            ProcessInfo.processInfo.environment["MNM_TEST_OPEN_OFFICIAL_LAUNCHER"] == "1" {
-            DispatchQueue.main.async { [weak self] in self?.update() }
+            if !usesOfficialLauncher {
+                DispatchQueue.main.async { [weak self] in self?.update() }
+            }
         }
         if AppStorage.applicationSupport.path.hasPrefix("/private/tmp/mnm-"),
            ProcessInfo.processInfo.environment["MNM_TEST_PLAY"] == "1" {
@@ -358,7 +373,15 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             }
             RunLoop.main.add(officialControlsTimer!, forMode: .common)
             RunLoop.main.add(officialControlsTimer!, forMode: .modalPanel)
-            DispatchQueue.main.async { [weak self] in self?.update() }
+        }
+        // Resolve the native app update before starting any Wine setup/launcher.
+        // Accepted updates replace this app first; Later/no update proceeds.
+        checkForAppUpdate { [weak self] in
+            guard let self else { return }
+            self.checkingAppUpdate = false
+            if self.usesOfficialLauncher && !self.installingAppUpdate && !self.isolatedUpdaterTest {
+                self.update()
+            }
         }
     }
 
@@ -874,6 +897,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
 
     private func installedAppVersion() -> String {
 #if DEBUG
+        if isolatedUpdaterTest { return "2.0.0" }
         if let override = ProcessInfo.processInfo.environment["MNM_TEST_APP_VERSION"],
            normalizedVersion(override) != nil {
             return override
@@ -910,19 +934,25 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
                          .foregroundColor: NSColor.secondaryLabelColor])
     }
 
-    private func checkForAppUpdate() {
+    private func checkForAppUpdate(completion: @escaping () -> Void = {}) {
         let currentVersion = installedAppVersion()
         var request = URLRequest(url: Self.latestReleaseAPIURL)
-        request.timeoutInterval = 10
+        request.timeoutInterval = 5
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("MnM-on-Mac/\(currentVersion)", forHTTPHeaderField: "User-Agent")
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
-            guard let response = response as? HTTPURLResponse,
-                  response.statusCode == 200,
-                  let data else { return }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 5
+        configuration.timeoutIntervalForResource = 5
+        let session = URLSession(configuration: configuration)
+        session.dataTask(with: request) { [weak self] data, response, _ in
+            session.finishTasksAndInvalidate()
             DispatchQueue.main.async { [weak self] in
+                defer { completion() }
                 guard let self,
+                      let response = response as? HTTPURLResponse,
+                      response.statusCode == 200,
+                      let data,
                       let release = try? JSONDecoder().decode(GitHubRelease.self, from: data),
                       release.htmlURL.scheme == "https",
                       release.htmlURL.host == "github.com",
@@ -975,7 +1005,12 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             .appendingPathComponent("mnm-app-update-\(UUID().uuidString).zip")
         var downloadResult: Result<URL, Error>?
         var acceptingResult = true
-        let task = URLSession.shared.downloadTask(with: assetURL) { location, response, error in
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 15 * 60
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let task = session.downloadTask(with: assetURL) { location, response, error in
             let result: Result<URL, Error>
             do {
                 if let error { throw error }
@@ -991,7 +1026,10 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
                 try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: retainedArchive.path)
                 result = .success(retainedArchive)
             } catch { result = .failure(error) }
-            DispatchQueue.main.async {
+            // This method can itself run inside a main-queue callback. AppKit's
+            // nested modal loop cannot re-enter that queue to finish a download.
+            // Deliver completion through the modal run loop instead.
+            RunLoop.main.perform(inModes: [.modalPanel, .default]) {
                 guard acceptingResult else {
                     try? FileManager.default.removeItem(at: retainedArchive)
                     return
@@ -1000,6 +1038,35 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
                 NSApp.abortModal()
             }
         }
+        var lastBytes: Int64 = 0
+        var lastProgress = Date()
+        let progressTimer = Timer(timeInterval: 0.25, repeats: true) { _ in
+            guard acceptingResult, downloadResult == nil else { return }
+            let received = task.countOfBytesReceived
+            let expected = task.countOfBytesExpectedToReceive
+            if received != lastBytes {
+                lastBytes = received
+                lastProgress = Date()
+            }
+            if Date().timeIntervalSince(lastProgress) >= 60 {
+                downloadResult = .failure(PatcherSetupError.message(
+                    "The app update download stopped responding. Please try again or download the update from GitHub Releases. Your current app has not been changed."))
+                task.cancel()
+                NSApp.abortModal()
+                return
+            }
+            let downloaded = ByteCountFormatter.string(fromByteCount: received, countStyle: .file)
+            let progress: String
+            if expected > 0 {
+                let total = ByteCountFormatter.string(fromByteCount: expected, countStyle: .file)
+                progress = "\(downloaded) of \(total)"
+            } else {
+                progress = received > 0 ? "\(downloaded) downloaded" : "Connecting to GitHub…"
+            }
+            alert.informativeText = "\(progress)\nPlease keep MnM on Mac open while the update downloads."
+        }
+        RunLoop.main.add(progressTimer, forMode: .modalPanel)
+        defer { progressTimer.invalidate() }
         task.resume()
         // The official main window belongs to Wine, so a native sheet attached
         // to our hidden setup window would be invisible.
@@ -1027,7 +1094,10 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             let prepared = try AppUpdateInstaller.prepare(archive: archive, currentApp: Bundle.main.bundleURL,
                                                           expectedVersion: version)
             let scriptURL = prepared.directory.appendingPathComponent("install.sh")
-            try prepared.script(waitingFor: ProcessInfo.processInfo.processIdentifier)
+            // An isolated updater test replaces only its disposable app copy.
+            // Never reopen the release binary, which lacks the test data override.
+            try prepared.script(waitingFor: ProcessInfo.processInfo.processIdentifier,
+                                reopen: !isolatedUpdaterTest)
                 .write(to: scriptURL, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
             installingAppUpdate = true
@@ -1842,6 +1912,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     }
 
     @objc private func update() {
+        guard !checkingAppUpdate, !installingAppUpdate, !isolatedUpdaterTest else { return }
         launcherStartupRetries = 0
         updateLauncher()
     }
