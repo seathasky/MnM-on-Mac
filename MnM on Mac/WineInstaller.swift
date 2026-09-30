@@ -7,6 +7,7 @@
 
 import Foundation
 import CryptoKit
+import Darwin
 
 struct RuntimeAsset {
     let label: String
@@ -114,6 +115,7 @@ struct D3DMetalInstaller {
         guard required.allSatisfy({ manager.fileExists(atPath: extracted.appendingPathComponent($0).path) }) else {
             throw PatcherSetupError.message("The support package contains an incomplete D3DMetal installation.")
         }
+        try WineInstaller.clearRuntimeQuarantine(extracted)
         try WineRuntime.d3dMetalVersion.write(to: extracted.appendingPathComponent("version.txt"), atomically: true, encoding: .utf8)
 
         try manager.createDirectory(at: paths.d3dMetal.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -234,7 +236,31 @@ struct WineInstaller {
             // ready immediately instead of requiring a second download.
             try D3DMetalInstaller(paths: paths).install(archive: archive, progress: progress)
         }
+        // Downloads are checksum-verified before extraction. Quarantine can
+        // survive extraction/copying and otherwise block their unsigned dylibs.
+        // Touch only these installed runtime components, never game/user data.
+        for directory in [paths.engine, paths.libraries, paths.d3dMetal] {
+            if manager.fileExists(atPath: directory.path) { try Self.clearRuntimeQuarantine(directory) }
+        }
         try WineRuntime.initialize(paths: paths, progress: progress)
+    }
+
+    static func clearRuntimeQuarantine(_ directory: URL) throws {
+        let manager = FileManager.default
+        var files = [directory]
+        if let enumerator = manager.enumerator(at: directory, includingPropertiesForKeys: [.isSymbolicLinkKey]) {
+            files += enumerator.compactMap { $0 as? URL }
+        }
+        for file in files {
+            let values = try file.resourceValues(forKeys: [.isSymbolicLinkKey])
+            guard values.isSymbolicLink != true else { continue }
+            let result = file.withUnsafeFileSystemRepresentation {
+                removexattr($0!, "com.apple.quarantine", XATTR_NOFOLLOW)
+            }
+            guard result == 0 || errno == ENOATTR else {
+                throw PatcherSetupError.message("A verified Wine support file could not be prepared for use (\(file.lastPathComponent)).")
+            }
+        }
     }
 
     func installLibraries(_ archive: URL) throws {

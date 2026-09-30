@@ -15,8 +15,16 @@ enum PatcherSetupError: LocalizedError {
 }
 
 final class OfficialDownloadGuard: NSObject, URLSessionTaskDelegate {
+    let allowMicrosoft: Bool
+    init(allowMicrosoft: Bool = false) { self.allowMicrosoft = allowMicrosoft }
     static func isAllowed(_ url: URL) -> Bool {
         let hosts = ["account.monstersandmemories.com", "pub-f06cad9ebbcd412bb0f4ff64f0f6a3d7.r2.dev"]
+        return url.scheme == "https" && hosts.contains(url.host ?? "") &&
+            (url.port == nil || url.port == 443) && url.user == nil && url.password == nil
+    }
+
+    static func isMicrosoft(_ url: URL) -> Bool {
+        let hosts = ["go.microsoft.com", "download.microsoft.com", "msedge.sf.dl.delivery.mp.microsoft.com", "msedge.sb.dl.delivery.mp.microsoft.com"]
         return url.scheme == "https" && hosts.contains(url.host ?? "") &&
             (url.port == nil || url.port == 443) && url.user == nil && url.password == nil
     }
@@ -24,7 +32,7 @@ final class OfficialDownloadGuard: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
                     completionHandler: @escaping (URLRequest?) -> Void) {
-        completionHandler(request.url.map(Self.isAllowed) == true ? request : nil)
+        completionHandler(request.url.map { Self.isAllowed($0) || (allowMicrosoft && Self.isMicrosoft($0)) } == true ? request : nil)
     }
 }
 
@@ -116,14 +124,15 @@ struct NativePatcherInstaller {
         return target
     }
 
-    private static func download(_ url: URL, to destination: URL, maximumBytes: Int64) throws {
-        guard OfficialDownloadGuard.isAllowed(url) else {
+    static func download(_ url: URL, to destination: URL, maximumBytes: Int64, allowMicrosoft: Bool = false) throws {
+        let allowed: (URL) -> Bool = { OfficialDownloadGuard.isAllowed($0) || (allowMicrosoft && OfficialDownloadGuard.isMicrosoft($0)) }
+        guard allowed(url) else {
             throw PatcherSetupError.message("The patcher download did not come from an official MnM address.")
         }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 30
         configuration.timeoutIntervalForResource = 120
-        let session = URLSession(configuration: configuration, delegate: OfficialDownloadGuard(), delegateQueue: nil)
+        let session = URLSession(configuration: configuration, delegate: OfficialDownloadGuard(allowMicrosoft: allowMicrosoft), delegateQueue: nil)
         defer { session.invalidateAndCancel() }
         let signal = DispatchSemaphore(value: 0)
         let result = DownloadResultBox()
@@ -132,7 +141,7 @@ struct NativePatcherInstaller {
             do {
                 if let error = error { throw error }
                 guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode),
-                      let finalURL = response.url, OfficialDownloadGuard.isAllowed(finalURL), let temporary = temporary else {
+                      let finalURL = response.url, allowed(finalURL), let temporary = temporary else {
                     throw PatcherSetupError.message("The official MnM download server did not return a usable download.")
                 }
                 let size = (try FileManager.default.attributesOfItem(atPath: temporary.path)[.size] as? NSNumber)?.int64Value ?? 0

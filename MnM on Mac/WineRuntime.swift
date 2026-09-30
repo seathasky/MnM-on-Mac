@@ -362,7 +362,8 @@ enum WineRuntime {
     }
 
     static func runQuiet(_ executable: URL, _ arguments: [String], environment: [String: String], timeout: TimeInterval,
-                         step: String = "Wine setup", log: URL? = nil) throws {
+                         step: String = "Wine setup", log: URL? = nil,
+                         allowedTerminationStatuses: Set<Int32> = [0]) throws {
         var logHandle: FileHandle?
         if let log = log {
             try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -394,15 +395,20 @@ enum WineRuntime {
             if process.isRunning { process.terminate() }
             throw PatcherSetupError.message("\(step) timed out. See Open Setup Log for details.")
         }
-        guard process.terminationStatus == 0 else {
+        guard allowedTerminationStatuses.contains(process.terminationStatus) else {
             throw PatcherSetupError.message("\(step) failed (code \(process.terminationStatus)). See Open Setup Log for the actual error.")
         }
     }
 }
 
 enum GameSession {
-    private static var database: URL { AppStorage.officialLauncherDatabase }
+    static var launcherDatabase: URL {
+        let candidates = [WinePaths.current.selectedGame?.deletingLastPathComponent().appendingPathComponent("launcher.db"),
+                          AppStorage.windowsLauncherDatabase, AppStorage.officialLauncherDatabase].compactMap { $0 }
+        return candidates.first { FileManager.default.fileExists(atPath: $0.path) } ?? AppStorage.officialLauncherDatabase
+    }
     private static func query(_ sql: String) -> String? {
+        let database = launcherDatabase
         guard FileManager.default.fileExists(atPath: database.path) else { return nil }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
@@ -419,7 +425,9 @@ enum GameSession {
         } catch { return nil }
     }
     private static func token() -> String? {
-        query("SELECT value FROM settings WHERE variable='token' LIMIT 1;")
+        let current = query("SELECT a.token FROM accounts a JOIN settings s ON s.variable='active_account' AND s.value=a.username LIMIT 1;")
+        if let current = current, !current.isEmpty { return current }
+        return query("SELECT value FROM settings WHERE variable='token' LIMIT 1;")
     }
     static func isValid(_ token: String, now: TimeInterval = Date().timeIntervalSince1970) -> Bool {
         let parts = token.split(separator: ".")

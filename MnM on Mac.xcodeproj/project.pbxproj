@@ -10,6 +10,7 @@
 		29837305304C051900712285 /* MnMGameBridge in CopyFiles */ = {isa = PBXBuildFile; fileRef = 298372D2304BFE6000712285 /* MnMGameBridge */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		29837306304C051900712285 /* MnMPatcherGuard in CopyFiles */ = {isa = PBXBuildFile; fileRef = 298372E4304C01D400712285 /* MnMPatcherGuard */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		29837307304C051900712285 /* MnMPlayRedirect.dylib in CopyFiles */ = {isa = PBXBuildFile; fileRef = 298372F3304C034C00712285 /* MnMPlayRedirect.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		4D4E4D57494E434F4D500002 /* LauncherCompatibilityAssets in Resources */ = {isa = PBXBuildFile; fileRef = 4D4E4D57494E434F4D500001 /* LauncherCompatibilityAssets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -74,6 +75,7 @@
 		298372D2304BFE6000712285 /* MnMGameBridge */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = MnMGameBridge; sourceTree = BUILT_PRODUCTS_DIR; };
 		298372E4304C01D400712285 /* MnMPatcherGuard */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = MnMPatcherGuard; sourceTree = BUILT_PRODUCTS_DIR; };
 		298372F3304C034C00712285 /* MnMPlayRedirect.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = MnMPlayRedirect.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
+		4D4E4D57494E434F4D500001 /* LauncherCompatibilityAssets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = LauncherCompatibilityAssets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -163,6 +165,7 @@
 				298372E5304C01D400712285 /* MnMPatcherGuard */,
 				298372F4304C034C00712285 /* MnMPlayRedirect */,
 				298372AB304BFCCF00712285 /* Products */,
+				4D4E4D57494E434F4D500001 /* LauncherCompatibilityAssets */,
 			);
 			sourceTree = "<group>";
 		};
@@ -336,6 +339,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				4D4E4D57494E434F4D500002 /* LauncherCompatibilityAssets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -517,7 +521,7 @@
 				CLANG_ENABLE_MODULES = YES;
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = 2Z4VFQNW75;
 				ENABLE_APP_SANDBOX = NO;
@@ -540,7 +544,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0.13;
+				MARKETING_VERSION = 2.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = io.github.seathasky.mnmonmac;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -567,7 +571,7 @@
 				CLANG_ENABLE_MODULES = YES;
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = 2Z4VFQNW75;
 				ENABLE_APP_SANDBOX = NO;
@@ -597,7 +601,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.0.13;
+				MARKETING_VERSION = 2.0.0;
 				PRODUCT_BUNDLE_IDENTIFIER = io.github.seathasky.mnmonmac;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;

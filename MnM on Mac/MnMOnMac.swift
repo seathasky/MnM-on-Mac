@@ -183,9 +183,9 @@ enum MnMOnMac {
             return
         }
         if CommandLine.arguments.contains("--check-launcher") {
-            let result = runHelper(["native-path"])
-            print(result.text)
-            exit(result.code)
+            let installer = WindowsPatcherInstaller()
+            print(installer.ready ? installer.executable.path : "The Windows launcher needs setup.")
+            exit(installer.ready ? 0 : 1)
         }
         let application = NSApplication.shared
         let delegate = LauncherDelegate()
@@ -215,6 +215,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     private static let devDiscordURL = URL(string: "https://discord.gg/9w6ZdaksDX")!
     private static let msyncEnabledKey = "MnMMsyncEnabled"
     private static let terminalLogKey = "MnMTerminalLog"
+    private static let launcherScaleKey = "MnMLauncherScale"
     private var window: NSWindow!
     private let statusLabel = NSTextField(wrappingLabelWithString: "Checking your game…")
     private let detailLabel = NSTextField(wrappingLabelWithString: "")
@@ -242,7 +243,9 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     private var hudButton: NSButton!
     private var availableReleaseURL: URL?
     private var availableAssetURL: URL?
+    private var availableAppVersion: String?
     private var updatePromptShown = false
+    private var installingAppUpdate = false
     private var state = ""
     private var busy = false
     private var patcherProcess: Process?
@@ -261,6 +264,12 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     private var lastGameStatusUpdate: TimeInterval = 0
     private var thirdPartyWindow: NSWindow?
     private let gameModeController = GameModeController()
+    private var officialControls: WindowsLauncherControls?
+    private var officialControlsTimer: Timer?
+    private var officialGameTicket: String?
+    private var footerMenuRequest = false
+    private var compactSetupWindow: CompactSetupWindow?
+    private var usesOfficialLauncher: Bool { true }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
@@ -278,20 +287,104 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             try AppStorage.prepare()
         } catch { storageFailure = error.localizedDescription }
         refresh()
-        window.makeKeyAndOrderFront(nil)
+        if usesOfficialLauncher {
+            compactSetupWindow = CompactSetupWindow(target: self, retryAction: #selector(update))
+            compactSetupWindow?.window.delegate = self
+            if storageFailure != nil || !WindowsPatcherInstaller().hasExistingInstallation {
+                compactSetupWindow?.show()
+            }
+        } else { window.makeKeyAndOrderFront(nil) }
         NSApp.activate(ignoringOtherApps: true)
-        if !UserDefaults.standard.bool(forKey: Self.hideWelcomeKey) {
+        if !usesOfficialLauncher && !UserDefaults.standard.bool(forKey: Self.hideWelcomeKey) {
             DispatchQueue.main.async { [weak self] in self?.showWelcomeExplanation() }
         }
         checkForAppUpdate()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.refresh() }
+        #if DEBUG
+        // Exercise the normal button action against isolated test storage,
+        // without automating the desktop or touching a user's installation.
+        if AppStorage.applicationSupport.path.hasPrefix("/private/tmp/mnm-"),
+           ProcessInfo.processInfo.environment["MNM_TEST_OPEN_OFFICIAL_LAUNCHER"] == "1" {
+            DispatchQueue.main.async { [weak self] in self?.update() }
+        }
+        if AppStorage.applicationSupport.path.hasPrefix("/private/tmp/mnm-"),
+           ProcessInfo.processInfo.environment["MNM_TEST_PLAY"] == "1" {
+            DispatchQueue.main.async { [weak self] in self?.play() }
+        }
+        #endif
+        if usesOfficialLauncher {
+            officialControlsTimer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
+                self?.refreshOfficialControls()
+            }
+            RunLoop.main.add(officialControlsTimer!, forMode: .common)
+            RunLoop.main.add(officialControlsTimer!, forMode: .modalPanel)
+            DispatchQueue.main.async { [weak self] in self?.update() }
+        }
+    }
+
+    private func refreshOfficialControls() {
+        // A completed installation opens directly into the official window.
+        // Keep startup failures visible even when no controls session was created.
+        if usesOfficialLauncher, patcherProcess?.isRunning != true,
+           storageFailure != nil || lastPatcherFailure != nil {
+            compactSetupWindow?.show()
+        }
+        if compactSetupWindow?.window.isVisible == true {
+            compactSetupWindow?.render(message: storageFailure ?? lastPatcherFailure ?? (statusLabel.stringValue.isEmpty ? "Opening the official launcher…" : statusLabel.stringValue),
+                                       explanation: detailLabel.stringValue, failed: storageFailure != nil || lastPatcherFailure != nil)
+        }
+        guard let controls = officialControls else { return }
+        try? controls.writeState(version: installedAppVersion(), backend: selectedGraphicsBackend,
+                                 busy: busy || GameRunState.isRunning(.current), updateAvailable: availableReleaseURL != nil,
+                                 launcherScale: UserDefaults.standard.integer(forKey: Self.launcherScaleKey))
+        guard NSApp.modalWindow == nil else { return }
+        for action in controls.takeActions() {
+            switch action {
+            case .ready:
+                window.orderOut(nil)
+                compactSetupWindow?.window.orderOut(nil)
+            case .discord: openDevDiscord()
+            case .updates: openUpdatesWebsite()
+            case .about: showThirdPartySoftware()
+            case .gameFolder: openInstallDirectory()
+            case .legal: showLegalExplanation()
+            case .options:
+                footerMenuRequest = true
+                showPerformanceHUDMenu(hudButton)
+                footerMenuRequest = false
+            case .appUpdate:
+                guard !GameRunState.isRunning(.current), availableReleaseURL != nil else { continue }
+                updatePromptShown = false
+                showUpdatePrompt(version: availableAppVersion ?? "update")
+            case .d3dMetal, .dxmt, .dxvk:
+                guard !busy, !GameRunState.isRunning(.current) else { continue }
+                graphicsBackendButton.selectItem(at: action == .d3dMetal ? 0 : action == .dxmt ? 1 : 2)
+                graphicsBackendChanged()
+            }
+        }
+        for ticket in controls.takeGameRequests() {
+            guard officialGameTicket == nil, !busy, gameProcess?.isRunning != true,
+                  !GameRunState.isRunning(.current) else {
+                try? controls.reportGame(ticket, exitCode: 170)
+                continue
+            }
+            officialGameTicket = ticket
+            play()
+            if gameProcess?.isRunning == true {
+                try? controls.reportGame(ticket)
+            } else {
+                try? controls.reportGame(ticket, exitCode: 1)
+                officialGameTicket = nil
+                if let failure = lastPatcherFailure { showError(failure) }
+            }
+        }
     }
 
     private func showWelcomeExplanation() {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = "How MnM on Mac Works"
-        alert.informativeText = "MnM on Mac sets up a self-contained Windows environment so the Windows version of Monsters & Memories can run on your Apple silicon Mac. During initial setup, it downloads Wine and the required support files, then opens the official Monsters & Memories launcher so you can sign in and install the game.\n\nAfter setup, MnM on Mac becomes your main launcher. Play starts the game directly using your saved official login session. The official launcher is only needed when you want to log in again, install an update, or repair the game. Everything stays inside MnM on Mac’s data folder, so CrossOver is not required."
+        alert.informativeText = "MnM on Mac sets up Wine and graphics support so the official Windows Monsters & Memories launcher and game can run on your Apple silicon Mac.\n\nWhen setup finishes, the official launcher opens. Use it to sign in, install, update, repair, and play the game. Your Mac graphics settings, options, Discord, About, Legal, and MnM on Mac updates are available in the attached footer.\n\nEverything stays inside MnM on Mac’s data folder. CrossOver is not required."
         alert.addButton(withTitle: "Continue")
 
         let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 390, height: 24))
@@ -486,7 +579,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             .font: labelFont,
             .foregroundColor: labelColor
         ])
-        let italicText = NSAttributedString(string: " (used for setup only)", attributes: [
+        let italicText = NSAttributedString(string: " (sign in, install, update, repair, and play)", attributes: [
             .font: italicLabelFont,
             .foregroundColor: NSColor.systemRed.withAlphaComponent(0.6)
         ])
@@ -762,6 +855,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
 
     private func showInstalledVersion() {
         availableReleaseURL = nil
+        availableAppVersion = nil
         versionButton.target = nil
         versionButton.action = nil
         versionButton.attributedTitle = NSAttributedString(
@@ -788,7 +882,12 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
                       release.htmlURL.host == "github.com",
                       self.isNewerVersion(release.tagName, than: currentVersion) else { return }
                 let version = release.tagName.lowercased().hasPrefix("v") ? String(release.tagName.dropFirst()) : release.tagName
-                self.availableAssetURL = release.assets.first(where: { $0.name.lowercased().hasSuffix(".zip") })?.browserDownloadURL
+                self.availableAppVersion = version
+                self.availableAssetURL = release.assets.first(where: {
+                    $0.name.lowercased().hasSuffix(".zip") && $0.browserDownloadURL.scheme == "https"
+                    && $0.browserDownloadURL.host == "github.com"
+                    && $0.browserDownloadURL.path.hasPrefix("/seathasky/MnM-on-Mac/releases/download/")
+                })?.browserDownloadURL
                 self.availableReleaseURL = release.htmlURL
                 self.versionButton.target = self
                 self.versionButton.action = #selector(self.openAvailableRelease)
@@ -804,7 +903,8 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     }
 
     private func showUpdatePrompt(version: String) {
-        guard !updatePromptShown, availableAssetURL != nil else { return }
+        guard !updatePromptShown, availableAssetURL != nil,
+              gameProcess?.isRunning != true, !GameRunState.isRunning(.current) else { return }
         updatePromptShown = true
         let alert = NSAlert()
         alert.alertStyle = .informational
@@ -816,53 +916,102 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     }
 
     private func installAvailableUpdate() {
-        guard let assetURL = availableAssetURL else { return }
+        guard let assetURL = availableAssetURL, !busy,
+              gameProcess?.isRunning != true, !GameRunState.isRunning(.current) else { return }
+        busy = true
+        defer { busy = false }
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = "Downloading Update…"
         alert.informativeText = "Please keep MnM on Mac open while the update downloads."
         alert.addButton(withTitle: "Cancel")
-        let task = URLSession.shared.downloadTask(with: assetURL) { [weak self] location, _, error in
+        let retainedArchive = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("mnm-app-update-\(UUID().uuidString).zip")
+        var downloadResult: Result<URL, Error>?
+        var acceptingResult = true
+        let task = URLSession.shared.downloadTask(with: assetURL) { location, response, error in
+            let result: Result<URL, Error>
+            do {
+                if let error { throw error }
+                guard let response = response as? HTTPURLResponse, response.statusCode == 200,
+                      let location,
+                      let size = try location.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+                      size > 0, size <= 100_000_000 else {
+                    throw PatcherSetupError.message("The app update download was incomplete or invalid. Your current app has not been changed.")
+                }
+                // URLSession removes its temporary download after this callback.
+                // Retain our own copy before returning, not on the main queue.
+                try FileManager.default.copyItem(at: location, to: retainedArchive)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: retainedArchive.path)
+                result = .success(retainedArchive)
+            } catch { result = .failure(error) }
             DispatchQueue.main.async {
-                alert.window.orderOut(nil)
-                guard let self, let location, error == nil else { return }
-                self.finishInstallingUpdate(from: location)
+                guard acceptingResult else {
+                    try? FileManager.default.removeItem(at: retainedArchive)
+                    return
+                }
+                downloadResult = result
+                NSApp.abortModal()
             }
         }
         task.resume()
-        alert.beginSheetModal(for: window)
+        // The official main window belongs to Wine, so a native sheet attached
+        // to our hidden setup window would be invisible.
+        let response = alert.runModal()
+        acceptingResult = false
+        alert.window.orderOut(nil)
+        if response == .alertFirstButtonReturn {
+            task.cancel()
+            try? FileManager.default.removeItem(at: retainedArchive)
+            return
+        }
+        switch downloadResult {
+        case .success(let archive): finishInstallingUpdate(from: archive)
+        case .failure(let error): showError("Update download failed: \(error.localizedDescription)")
+        case nil: task.cancel()
+        }
     }
 
     private func finishInstallingUpdate(from archive: URL) {
-        let appURL = Bundle.main.bundleURL
-        let destination = appURL.deletingLastPathComponent()
-        let pid = ProcessInfo.processInfo.processIdentifier
-        let scriptURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("mnm-update-\(pid).sh")
-        func quote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
-        let script = """
-        #!/bin/sh
-        archive=\(quote(archive.path))
-        destination=\(quote(destination.path))
-        app=\(quote(appURL.path))
-        work=\"$TMPDIR/mnm-update-\(pid)\"
-        mkdir -p \"$work\"
-        ditto -x -k \"$archive\" \"$work\"
-        newapp=\"$(find \"$work\" -maxdepth 2 -name '*.app' -type d | head -1)\"
-        if [ -z \"$newapp\" ]; then exit 1; fi
-        while kill -0 \(pid) 2>/dev/null; do sleep 1; done
-        rm -rf \"$app\"
-        ditto \"$newapp\" \"$app\"
-        open \"$app\"
-        rm -f \(quote(scriptURL.path))
-        """
+        defer { try? FileManager.default.removeItem(at: archive) }
         do {
-            try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+            guard let version = availableAppVersion else {
+                throw PatcherSetupError.message("The expected app update version could not be identified.")
+            }
+            let prepared = try AppUpdateInstaller.prepare(archive: archive, currentApp: Bundle.main.bundleURL,
+                                                          expectedVersion: version)
+            let scriptURL = prepared.directory.appendingPathComponent("install.sh")
+            try prepared.script(waitingFor: ProcessInfo.processInfo.processIdentifier)
+                .write(to: scriptURL, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/bin/sh")
-            process.arguments = [scriptURL.path]
-            try process.run()
-            NSApp.terminate(nil)
+            installingAppUpdate = true
+            let launcher = patcherProcess
+            if launcher?.isRunning == true {
+                expectedPatcherTermination = true
+                WindowsPatcherInstaller().requestClose(launcher!)
+            }
+            DispatchQueue.global(qos: .userInitiated).async {
+                let deadline = Date().addingTimeInterval(30)
+                while launcher?.isRunning == true && Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
+                DispatchQueue.main.async {
+                    do {
+                        guard launcher?.isRunning != true else {
+                            throw PatcherSetupError.message("The official launcher did not close. Your current app has not been changed.")
+                        }
+                        let process = Process()
+                        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+                        process.arguments = [scriptURL.path]
+                        process.standardInput = FileHandle.nullDevice
+                        process.standardOutput = FileHandle.nullDevice
+                        process.standardError = FileHandle.nullDevice
+                        try process.run()
+                        NSApp.terminate(nil)
+                    } catch {
+                        self.installingAppUpdate = false
+                        self.showError("Update Failed: \(error.localizedDescription)")
+                    }
+                }
+            }
         } catch {
             let failure = NSAlert()
             failure.messageText = "Update Failed"
@@ -933,7 +1082,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
                     statusLabel.textColor = .systemGreen
                     detailLabel.stringValue = "Closing the official launcher and preparing MnM on Mac."
                     playButton.isEnabled = false
-                    patcher.terminate()
+                    WindowsPatcherInstaller().requestClose(patcher)
                     return
                 }
             } else {
@@ -945,7 +1094,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             statusLabel.textColor = .labelColor
             detailLabel.stringValue = closePatcherAfterInitialSetup
                 ? "Sign in and finish installing there. It will close automatically when setup is complete."
-                : "Use it only to finish installing or updating. Close it when you are done."
+                : "Use the official launcher to sign in, install, update, repair, and play. Mac settings are in the attached footer."
             playButton.title = "Show Official Launcher"
             playButton.isEnabled = true
             if let failure = lastPatcherFailure {
@@ -981,11 +1130,11 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         case "needs_login":
             let gameFound = WinePaths.current.selectedGame != nil
             statusLabel.stringValue = gameFound ? "Game installed — sign in to play" : "Sign in to play"
-            detailLabel.stringValue = "Use the official launcher to sign in. When it shows Play, close it and return here."
+            detailLabel.stringValue = "Sign in through the official launcher, then install or play the game there."
             playButton.title = "Open Official Launcher"
         case "needs_game":
             statusLabel.stringValue = "Install Monsters & Memories"
-            detailLabel.stringValue = "The official launcher downloads and verifies the game. Close it when it shows Play."
+            detailLabel.stringValue = "Install the game through the official launcher. When it is ready, choose Play there."
             playButton.title = "Install Game"
         case "needs_wine":
             statusLabel.stringValue = "Set up Wine to play"
@@ -1005,7 +1154,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             detailLabel.stringValue = "Set Up Wine will install Apple’s Rosetta first."
         case "missing_launcher":
             statusLabel.stringValue = "Install the official launcher"
-            detailLabel.stringValue = "It is only used to sign in, install, and update the game."
+            detailLabel.stringValue = "Use it to sign in, install, update, repair, and play the game."
             playButton.title = "Install Official Launcher"
         default:
             statusLabel.stringValue = "Unable to check the game"
@@ -1040,14 +1189,17 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
 
     @objc private func play() {
         refresh()
-        guard !busy, storageFailure == nil else { return }
-        if patcherProcess?.isRunning == true { update(); return }
-        switch LauncherStep(readiness: state) {
+        guard !busy, !installingAppUpdate, storageFailure == nil else { return }
+        let officialRequest = officialGameTicket != nil && usesOfficialLauncher
+        if patcherProcess?.isRunning == true && !officialRequest { update(); return }
+        let launchReadiness = officialRequest ? WineRuntime.readiness : state
+        switch LauncherStep(readiness: launchReadiness) {
         case .setup: setupWine(); return
         case .update: update(); return
         default: break
         }
-        guard state == "ready", gameProcess?.isRunning != true, patcherProcess?.isRunning != true else { return }
+        guard launchReadiness == "ready", gameProcess?.isRunning != true,
+              officialRequest || patcherProcess?.isRunning != true else { return }
         if gameModeEnabled && !gameModeController.isAvailable {
             showGameModeRequirement()
             return
@@ -1086,11 +1238,18 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
                 DispatchQueue.main.async {
                     guard let self = self, self.gameProcess === finished else { return }
                     self.gameProcess = nil
+                    if let ticket = self.officialGameTicket {
+                        try? self.officialControls?.reportGame(ticket, exitCode: finished.terminationStatus)
+                        self.officialGameTicket = nil
+                    }
                     self.gameModeController.deactivate()
                     if finished.terminationStatus != 0 {
                         self.lastPatcherFailure = self.gameFailureMessage(for: finished.terminationStatus)
                     }
                     self.refresh()
+                    if self.usesOfficialLauncher && self.patcherProcess?.isRunning != true {
+                        NSApp.terminate(nil)
+                    }
                 }
             }
             gameProcess = process
@@ -1144,24 +1303,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         setProgressMessage("Checking Rosetta…", detail: setupEstimate)
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                try WineInstaller(paths: .current).install(approveRosettaInstallation: {
-                    DispatchQueue.main.sync {
-                        let alert = NSAlert()
-                        alert.messageText = "Install Apple’s Rosetta?"
-                        alert.informativeText = "Rosetta is required to run Wine on this Mac. Choose Agree and Install to accept Apple’s Rosetta software license agreement and download Rosetta from Apple. Wine setup will continue automatically."
-                        alert.addButton(withTitle: "Agree and Install")
-                        alert.addButton(withTitle: "Cancel")
-                        alert.addButton(withTitle: "View License")
-                        while true {
-                            switch alert.runModal() {
-                            case .alertFirstButtonReturn: return true
-                            case .alertThirdButtonReturn:
-                                NSWorkspace.shared.open(URL(string: "https://www.apple.com/legal/sla/")!)
-                            default: return false
-                            }
-                        }
-                    }
-                }) { message in
+                try WineInstaller(paths: .current).install(approveRosettaInstallation: self.approveRosettaInstallation) { message in
                     DispatchQueue.main.async {
                         self.setProgressMessage(message, detail: setupEstimate)
                     }
@@ -1182,6 +1324,26 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
                 }
             }
         }
+    }
+
+    private func approveRosettaInstallation() -> Bool {
+        let ask = {
+            let alert = NSAlert()
+            alert.messageText = "Install Apple’s Rosetta?"
+            alert.informativeText = "Rosetta is required to run Wine on this Mac. Choose Agree and Install to accept Apple’s Rosetta software license agreement and download Rosetta from Apple. Wine setup will continue automatically."
+            alert.addButton(withTitle: "Agree and Install")
+            alert.addButton(withTitle: "Cancel")
+            alert.addButton(withTitle: "View License")
+            while true {
+                switch alert.runModal() {
+                case .alertFirstButtonReturn: return true
+                case .alertThirdButtonReturn:
+                    NSWorkspace.shared.open(URL(string: "https://www.apple.com/legal/sla/")!)
+                default: return false
+                }
+            }
+        }
+        return Thread.isMainThread ? ask() : DispatchQueue.main.sync(execute: ask)
     }
 
     private func startSetupAnimation() {
@@ -1372,6 +1534,20 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
 
     @objc private func showPerformanceHUDMenu(_ sender: NSButton) {
         let menu = NSMenu()
+        let scaleMenu = NSMenu()
+        let currentScale = UserDefaults.standard.integer(forKey: Self.launcherScaleKey)
+        for value in [0, 60, 70, 80, 90, 100, 125] {
+            let entry = NSMenuItem(title: value == 0 ? "Automatic (Fit Screen)" : "\(value)%",
+                                   action: #selector(changeLauncherScale(_:)), keyEquivalent: "")
+            entry.target = self
+            entry.tag = value
+            entry.state = currentScale == value ? .on : .off
+            scaleMenu.addItem(entry)
+        }
+        let scaleItem = NSMenuItem(title: "Launcher Scale", action: nil, keyEquivalent: "")
+        scaleItem.submenu = scaleMenu
+        menu.addItem(scaleItem)
+        menu.addItem(.separator())
         let renderer: String
         switch selectedGraphicsBackend {
         case .metal: renderer = "DXMT"
@@ -1411,11 +1587,22 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         menu.addItem(.separator())
         let noteTitle = gameModeController.isAvailable
             ? "Applies on next game launch"
-            : "Game Mode requires Xcode Command Line Tools"
+            : "Game Mode requires full Xcode"
         let note = NSMenuItem(title: noteTitle, action: nil, keyEquivalent: "")
         note.isEnabled = false
         menu.addItem(note)
-        menu.popUp(positioning: item, at: NSPoint(x: sender.bounds.midX, y: sender.bounds.maxY + 4), in: sender)
+        if footerMenuRequest {
+            NSApp.activate(ignoringOtherApps: true)
+            menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+        } else {
+            menu.popUp(positioning: item, at: NSPoint(x: sender.bounds.midX, y: sender.bounds.maxY + 4), in: sender)
+        }
+    }
+
+    @objc private func changeLauncherScale(_ sender: NSMenuItem) {
+        guard [0, 60, 70, 80, 90, 100, 125].contains(sender.tag) else { return }
+        UserDefaults.standard.set(sender.tag, forKey: Self.launcherScaleKey)
+        refreshOfficialControls()
     }
 
     @objc private func togglePerformanceHUD() {
@@ -1562,7 +1749,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         switch setupState {
         case "needs_wine":
             setupInfoTitle.stringValue = "Why Wine is needed"
-            setupInfoBody.stringValue = "Monsters & Memories is built for Windows. Wine lets it run on your Mac inside a private environment, with no separate CrossOver installation required."
+            setupInfoBody.stringValue = "Wine lets the official Windows Monsters & Memories launcher and game run on your Mac. Setup also installs graphics support. CrossOver is not required."
         case "needs_libraries":
             setupInfoTitle.stringValue = "Why support files are needed"
             setupInfoBody.stringValue = "These files supply the Windows libraries and graphics translation required by the official launcher and game."
@@ -1574,13 +1761,13 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             setupInfoBody.stringValue = "This Windows environment keeps Wine, the official launcher, game files, and settings together without changing the rest of your Mac."
         case "missing_launcher", "needs_login":
             setupInfoTitle.stringValue = "Why the official launcher is needed"
-            setupInfoBody.stringValue = "It handles signing in, installing, and updating. Once setup finishes, it closes automatically and MnM on Mac becomes your normal Play button."
+            setupInfoBody.stringValue = "Use the official launcher to sign in, install, update, repair, and play. Your Mac graphics settings and options are available in the attached footer."
         case "needs_game":
             setupInfoTitle.stringValue = "What the official launcher is doing"
-            setupInfoBody.stringValue = "It downloads and verifies Monsters & Memories. When the game is ready, the launcher closes automatically to finish setup."
+            setupInfoBody.stringValue = "It downloads and verifies Monsters & Memories. When installation finishes, choose Play in the official launcher."
         default:
             setupInfoTitle.stringValue = "What setup is doing"
-            setupInfoBody.stringValue = "MnM on Mac is preparing the components required to run the game."
+            setupInfoBody.stringValue = "MnM on Mac is preparing Wine and graphics support. The official launcher will open when setup is complete."
         }
     }
 
@@ -1596,7 +1783,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             setupInfoBody.stringValue = "It keeps the launcher, game, and Wine settings together without requiring CrossOver."
         } else {
             setupInfoTitle.stringValue = "Why Wine is needed"
-            setupInfoBody.stringValue = "Wine is the compatibility layer that lets the Windows game run on your Mac."
+            setupInfoBody.stringValue = "Wine lets the official Windows launcher and game run on your Mac. The official launcher will open when setup is complete."
         }
     }
 
@@ -1620,40 +1807,44 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         reauthenticateButton.isEnabled = false
         playButton.isEnabled = false
         lastPatcherFailure = nil
-        defer { busy = false; refresh() }
 
-        let nativePath = runHelper(["native-path"])
-        if nativePath.code != 0 {
-            downloadPatcher()
-            return
-        }
         let workingPath = runHelper(["patch-directory"])
-        guard nativePath.code == 0, workingPath.code == 0 else {
-            lastPatcherFailure = nativePath.code != 0 ? nativePath.text : workingPath.text
+        guard workingPath.code == 0 else {
+            lastPatcherFailure = workingPath.text
+            busy = false
+            refresh()
             return
         }
-        let plan = PatcherLaunchPlan(
-            executableURL: URL(fileURLWithPath: nativePath.text).appendingPathComponent("Contents/MacOS/" + PatcherBundleGuard.executableName),
-            workingDirectoryURL: URL(fileURLWithPath: workingPath.text, isDirectory: true),
-            environmentOverrides: [
-                "MNM_GRAPHICS_BACKEND": selectedGraphicsBackend.rawValue,
-                "MNM_GRAPHICS_HUD": performanceHUDEnabled ? "1" : "0"
-            ])
-        do {
-            guard let guardExecutable = Bundle.main.url(forResource: PatcherBundleGuard.executableName, withExtension: nil),
-                  let bridgeExecutable = Bundle.main.url(forResource: "MnMGameBridge", withExtension: nil),
-                  let redirectLibrary = Bundle.main.url(forResource: "MnMPlayRedirect", withExtension: "dylib") else {
-                throw PatcherSetupError.message("The patcher startup helper is missing from this app.")
+        let workingDirectory = URL(fileURLWithPath: workingPath.text, isDirectory: true)
+        let installer = WindowsPatcherInstaller(workingDirectory: workingDirectory)
+        guard installer.ready else { busy = false; downloadPatcher(); return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try installer.prepareLaunch()
+                DispatchQueue.main.async { self.startPreparedLauncher(installer) }
+            } catch {
+                DispatchQueue.main.async {
+                    self.busy = false
+                    self.lastPatcherFailure = "The launcher could not restart: \(error.localizedDescription)"
+                    self.refresh()
+                }
             }
-            try PatcherBundleGuard.prepare(app: URL(fileURLWithPath: nativePath.text), guardExecutable: guardExecutable,
-                                           bridgeExecutable: bridgeExecutable, redirectLibrary: redirectLibrary)
-            try FileManager.default.createDirectory(at: plan.workingDirectoryURL, withIntermediateDirectories: true)
-            let process = plan.makeProcess()
+        }
+    }
+
+    private func startPreparedLauncher(_ installer: WindowsPatcherInstaller) {
+        defer { busy = false; refresh() }
+        do {
+            if usesOfficialLauncher { officialControls = try WindowsLauncherControls() }
+            let process = try installer.makeProcess(controlsDirectory: officialControls?.directory,
+                                                   graphicsBackend: selectedGraphicsBackend, appVersion: installedAppVersion())
             process.terminationHandler = { [weak self] finished in
                 DispatchQueue.main.async {
                     guard let self = self, self.patcherProcess === finished else { return }
                     let expectedTermination = self.expectedPatcherTermination
                     self.patcherProcess = nil
+                    self.officialControls?.finish()
+                    self.officialControls = nil
                     self.closePatcherAfterInitialSetup = false
                     self.patcherReadyChecks = 0
                     self.expectedPatcherTermination = false
@@ -1661,9 +1852,16 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
                         self.lastPatcherFailure = "The official launcher stopped (code \(finished.terminationStatus)). Reopen it and try again."
                     }
                     self.refresh()
+                    if self.usesOfficialLauncher {
+                        if self.lastPatcherFailure != nil {
+                            self.compactSetupWindow?.show()
+                        } else if !expectedTermination && !GameRunState.isRunning(.current) {
+                            NSApp.terminate(nil)
+                        }
+                    }
                 }
             }
-            closePatcherAfterInitialSetup = !UserDefaults.standard.bool(forKey: Self.completedInitialSetupKey)
+            closePatcherAfterInitialSetup = !usesOfficialLauncher && !UserDefaults.standard.bool(forKey: Self.completedInitialSetupKey)
                 && WineRuntime.readiness != "ready"
             patcherReadyChecks = 0
             expectedPatcherTermination = false
@@ -1680,6 +1878,9 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
 
     private func downloadPatcher() {
         DispatchQueue.main.async {
+            if self.usesOfficialLauncher && !WindowsPatcherInstaller().hasExistingInstallation {
+                self.compactSetupWindow?.show()
+            }
             self.busy = true
             self.playButton.isEnabled = false
             self.playButton.title = "Downloading…"
@@ -1688,16 +1889,16 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             self.detailLabel.stringValue = "This only needs to be set up once."
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
-                    let installer = NativePatcherInstaller(toolsDirectory: NativePatcherInstaller.defaultToolsDirectory)
-                    _ = try installer.install { message in
+                    let installer = WindowsPatcherInstaller()
+                    try installer.install(approveRosettaInstallation: self.approveRosettaInstallation) { message in
                         DispatchQueue.main.async {
                             self.statusLabel.stringValue = message
-                            self.detailLabel.stringValue = "Used only to sign in, install, and update. Close it when it shows Play."
+                            self.detailLabel.stringValue = "The official launcher will open when setup is complete."
                             self.setupInfoTitle.stringValue = "Why the official launcher is needed"
-                            self.setupInfoBody.stringValue = "It handles signing in, installing, and updating. When it shows Play, close it and return here—MnM on Mac becomes your normal Play button."
+                            self.setupInfoBody.stringValue = "Use it to sign in, install, update, repair, and play. Mac graphics settings and options are available in the attached footer."
                         }
                     }
-                    guard runHelper(["native-path"]).code == 0 else {
+                    guard installer.ready else {
                         throw PatcherSetupError.message("The installed patcher could not be found. Reopen MnM on Mac and try again.")
                     }
                     DispatchQueue.main.async {
@@ -1743,7 +1944,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         switch alert.runModal() {
         case .alertFirstButtonReturn:
             do {
-                _ = try AppStorage.backupOfficialLauncherData()
+                try AppStorage.resetLauncherState(database: GameSession.launcherDatabase, resetInstallation: true)
                 return true
             } catch {
                 showError("The old launcher data could not be backed up: \(error.localizedDescription)")
@@ -1778,7 +1979,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         do {
-            _ = try AppStorage.backupOfficialLauncherData()
+            try AppStorage.resetLauncherState(database: GameSession.launcherDatabase)
             lastPatcherFailure = nil
             refresh()
             update()
@@ -1789,19 +1990,14 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
 
     @objc private func openInstallDirectory() {
         if let failure = storageFailure { showError(failure); return }
-        let result = runHelper(["install-directory"])
-        guard result.code == 0, !result.text.isEmpty else {
-            showError("The app's data folder could not be located.")
-            return
-        }
-        let directory = URL(fileURLWithPath: result.text, isDirectory: true)
+        let directory = WinePaths.current.selectedGame ?? WinePaths.current.game
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             if !NSWorkspace.shared.open(directory) {
-                showError("Finder could not open the app's data folder.")
+                showError("Finder could not open the game folder.")
             }
         } catch {
-            showError("The app's data folder could not be opened: \(error.localizedDescription)")
+            showError("The game folder could not be opened: \(error.localizedDescription)")
         }
     }
 
@@ -1824,9 +2020,13 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = "Legal & Compatibility"
-        alert.informativeText = "MnM on Mac is a native Swift app that makes the existing Mac and Wine setup much easier while staying within the Master User Agreement. It creates a self-contained Wine environment, but still relies entirely on the official Monsters & Memories launcher for logging in, installing, updating, and repairing the game. All account and download communication stays between the official launcher and NWC’s servers.\n\nThe only thing MnM on Mac changes is the local Play handoff, which can loop or fail on macOS. We redirect that handoff into the correct Wine environment so the game launches properly. After setup, players can use MnM on Mac’s Play button for convenience and open the official launcher whenever they need to log in, update, or repair. We don’t recreate or reverse-engineer any NWC services.\n\nMonsters & Memories, its name, logos, artwork, official launcher, game assets, and all related materials belong solely to Niche Worlds Cult and its licensors. MnM on Mac claims no ownership of those materials and is an independent community compatibility tool that is not affiliated with or endorsed by Niche Worlds Cult."
+        alert.informativeText = "MnM on Mac prepares a self-contained Wine environment for the official Windows Monsters & Memories launcher and game. The official launcher handles signing in, installing, updating, repairing, and playing. Account and download communication stays between the official launcher and NWC’s servers.\n\nOur Mac controls are attached in a footer. The official launcher's executable, artwork, and interface are not modified. Its local Play handoff is routed through the selected Wine graphics environment, with optional Mac Game Mode support. MnM on Mac does not recreate NWC services.\n\nMonsters & Memories, its name, logos, artwork, official launcher, game assets, and all related materials belong solely to Niche Worlds Cult and its licensors. MnM on Mac claims no ownership of those materials and is an independent community compatibility tool that is not affiliated with or endorsed by Niche Worlds Cult."
         alert.addButton(withTitle: "Done")
         alert.addButton(withTitle: "View Master User Agreement")
+        if usesOfficialLauncher {
+            if alert.runModal() == .alertSecondButtonReturn { NSWorkspace.shared.open(Self.masterUserAgreementURL) }
+            return
+        }
         alert.beginSheetModal(for: window) { response in
             if response == .alertSecondButtonReturn {
                 NSWorkspace.shared.open(Self.masterUserAgreementURL)
@@ -1948,9 +2148,31 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     }
 
     func applicationDidBecomeActive(_ notification: Notification) { refresh() }
-    func applicationWillTerminate(_ notification: Notification) { gameModeController.deactivate() }
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationWillTerminate(_ notification: Notification) {
+        gameModeController.deactivate()
+        if let launcher = patcherProcess, launcher.isRunning {
+            WindowsPatcherInstaller().requestClose(launcher)
+        }
+    }
+    func windowWillClose(_ notification: Notification) {
+        if let closing = notification.object as? NSWindow,
+           closing === compactSetupWindow?.window { NSApp.terminate(nil) }
+    }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        // The visible main window belongs to Wine. Hiding the native setup
+        // window must not stop the controller that services its attached footer.
+        !usesOfficialLauncher
+    }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if usesOfficialLauncher {
+            if let launcher = patcherProcess, launcher.isRunning {
+                WindowsPatcherInstaller().requestShow(launcher)
+            } else if !GameRunState.isRunning(.current) {
+                compactSetupWindow?.show()
+                update()
+            }
+            return true
+        }
         window.makeKeyAndOrderFront(nil)
         refresh()
         return true

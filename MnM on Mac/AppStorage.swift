@@ -11,7 +11,13 @@ enum AppStorage {
     static let name = "MnM on Mac"
     static let legacyName = "MnM on Mac Wine"
     static var applicationSupport: URL {
-        FileManager.default.homeDirectoryForCurrentUser
+        #if DEBUG
+        if let test = ProcessInfo.processInfo.environment["MNM_TEST_APPLICATION_SUPPORT"],
+           test.hasPrefix("/private/tmp/mnm-"), !test.contains("..") {
+            return URL(fileURLWithPath: test, isDirectory: true)
+        }
+        #endif
+        return FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support", isDirectory: true)
     }
     static var directory: URL { applicationSupport.appendingPathComponent(name, isDirectory: true) }
@@ -19,12 +25,91 @@ enum AppStorage {
         applicationSupport.appendingPathComponent("com.monstersandmemories.mnm-patcher-app", isDirectory: true)
     }
     static var officialLauncherDatabase: URL { officialLauncherDirectory.appendingPathComponent("launcher.db") }
+    static var windowsLauncherDirectory: URL { directory.appendingPathComponent("Game", isDirectory: true) }
+    static var windowsLauncherDatabase: URL { windowsLauncherDirectory.appendingPathComponent("launcher.db") }
+
+    static func resetLauncherState(database: URL, resetInstallation: Bool = false) throws {
+        if database == officialLauncherDatabase {
+            _ = try backupOfficialLauncherData()
+            return
+        }
+        let manager = FileManager.default
+        guard manager.fileExists(atPath: database.path) else { return }
+        let backups = directory.appendingPathComponent("LauncherBackups", isDirectory: true)
+        try manager.createDirectory(at: backups, withIntermediateDirectories: true)
+        let backup = backups.appendingPathComponent("launcher-\(UUID().uuidString).db")
+        func run(_ path: URL, _ command: String, readOnly: Bool = false) throws {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+            process.arguments = (readOnly ? ["-readonly"] : []) + [path.path, command]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try process.run(); process.waitUntilExit()
+            guard process.terminationStatus == 0 else { throw StorageError.launcherMigration }
+        }
+        let quoted = "'" + backup.path.replacingOccurrences(of: "'", with: "''") + "'"
+        try run(database, ".backup \(quoted)", readOnly: true)
+        try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backup.path)
+        let installation = resetInstallation ? "DELETE FROM game_versions;" : ""
+        try run(database, """
+            BEGIN IMMEDIATE;
+            CREATE TABLE IF NOT EXISTS accounts (username TEXT PRIMARY KEY, token TEXT NOT NULL);
+            DELETE FROM accounts;
+            DELETE FROM settings WHERE variable IN ('token','username','active_account');
+            \(installation)
+            COMMIT;
+            """)
+    }
+
+    // Migrate a consistent SQLite snapshot, never the game folder or Wine prefix.
+    // The original database remains available for rollback and older app builds.
+    static func migrateLauncherDatabase(to destination: URL) throws {
+        let manager = FileManager.default
+        guard !manager.fileExists(atPath: destination.path),
+              manager.fileExists(atPath: officialLauncherDatabase.path) else { return }
+        try manager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let stage = destination.deletingLastPathComponent().appendingPathComponent(".launcher-migration-\(UUID().uuidString).db")
+        defer { try? manager.removeItem(at: stage) }
+        func quote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "''") + "'" }
+        func sqlite(_ arguments: [String]) throws {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+            process.arguments = arguments
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                throw StorageError.launcherMigration
+            }
+        }
+        try sqlite(["-readonly", officialLauncherDatabase.path, ".backup \(quote(stage.path))"])
+        try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: stage.path)
+        // The newer Windows launcher stores per-account credentials rather than
+        // the legacy single-token setting. Copy within SQLite, not command args.
+        try sqlite([stage.path, """
+            BEGIN IMMEDIATE;
+            CREATE TABLE IF NOT EXISTS accounts (username TEXT PRIMARY KEY, token TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS account_aliases (username TEXT PRIMARY KEY, alias TEXT NOT NULL);
+            INSERT OR IGNORE INTO accounts (username,token)
+                SELECT u.value,t.value FROM settings u,settings t
+                WHERE u.variable='username' AND t.variable='token'
+                    AND length(u.value)>0 AND length(t.value)>0;
+            INSERT OR IGNORE INTO settings (variable,value)
+                SELECT 'active_account',value FROM settings
+                WHERE variable='username' AND length(value)>0;
+            COMMIT;
+            """])
+        // No replacement of an existing Windows database, even on retry.
+        guard !manager.fileExists(atPath: destination.path) else { return }
+        try manager.moveItem(at: stage, to: destination)
+    }
     static var requiresMigration: Bool {
         FileManager.default.fileExists(atPath: applicationSupport.appendingPathComponent(legacyName).path)
     }
 
     enum StorageError: LocalizedError {
-        case conflict, rendererPrefixConflict(String), unsupportedFolder
+        case conflict, rendererPrefixConflict(String), unsupportedFolder, launcherMigration
         var errorDescription: String? {
             switch self {
             case .conflict:
@@ -33,6 +118,8 @@ enum AppStorage {
                 return "Both the old and new \(name) prefix folders exist. Nothing was overwritten. Resolve the duplicate folders, then reopen this app."
             case .unsupportedFolder:
                 return "The app's Application Support location is not a regular folder. Nothing was moved."
+            case .launcherMigration:
+                return "The launcher sign-in data could not be upgraded. The original data was left unchanged."
             }
         }
     }
