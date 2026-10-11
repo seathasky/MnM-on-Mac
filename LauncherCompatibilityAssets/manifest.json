@@ -2,8 +2,8 @@
   "version": "mnm-webview2-1",
   "wine": "Sikarugir 10.0_6",
   "files": {
-    "MnMWebViewBridge.dll": "fbd158d74871b5a4c82a165b72613773b2dfca6133dc28b26acccf37ab9852ed",
-    "MnMWindowsLauncher.exe": "fe11a3c39fb4973751db733cb015e411120b8a77c9513392b780d451cb513d72",
+    "MnMWebViewBridge.dll": "5bfb2e0d8a5878d78f9de7282acad7f4fa1f702cf0035ce4f1374db83c15aca7",
+    "MnMWindowsLauncher.exe": "2f731ed59dc01ca88470946ccdf839a05e74699b2118d01dc8d4aa71ec791064",
     "user32.dll": "705bf99a9a6cc45d9baee8594a7239632163142426823d8556d775c9a0849296",
     "ole32.dll": "56e3cf1cf00fb592a9b39287528d2bad8db00f004a82172a9e8b32e4c4c33f9b",
     "MnMLauncherRetina.dylib": "a98286d29e3ac5b58b7bbbaf72f55affd2e0934657fa0081eb1827f7ec855c4e"

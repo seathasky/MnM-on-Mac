@@ -1,3 +1,5 @@
+#include <shellapi.h>
+#include "game_session_token.h"
 /* Only the configured game's process creation is redirected. The official
  * launcher, WebView, authentication, downloads, and repair remain untouched. */
 static BOOL (WINAPI *real_createprocess)(LPCWSTR,LPWSTR,LPSECURITY_ATTRIBUTES,
@@ -23,8 +25,27 @@ static BOOL WINAPI bridge_createprocess(LPCWSTR app,LPWSTR command,LPSECURITY_AT
         return real_createprocess(app,command,pa,ta,inherit,flags,environment,directory,startup,process);
     length=GetEnvironmentVariableW(L"MNM_PLAY_HELPER",helper,32768);
     if(!length || length>=32768 || wcschr(helper,L'"')){SetLastError(ERROR_FILE_NOT_FOUND);return FALSE;}
-    WCHAR handoff[32768];if(swprintf(handoff,32768,L"\"%ls\" --game-wait",helper)<0){SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}
-    /* The helper inherits only the launcher's private control channel. Account
-     * tokens are not copied to command files or compatibility logs. */
+    int count=0;
+    LPWSTR *arguments=command?CommandLineToArgvW(command,&count):NULL;
+    LPCWSTR token=NULL;
+    for(int i=0;arguments && i<count;i++) {
+        if(!wcscmp(arguments[i],L"--token") && i+1<count) {
+            if(token){LocalFree(arguments);SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}
+            token=arguments[++i];
+        } else if(!wcsncmp(arguments[i],L"--token=",8)) {
+            if(token){LocalFree(arguments);SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}
+            token=arguments[i]+8;
+        }
+    }
+    if(!game_token_valid(token)) {
+        if(arguments)LocalFree(arguments);
+        SetLastError(ERROR_INVALID_PARAMETER);return FALSE;
+    }
+    WCHAR handoff[32768];
+    int length_handoff=swprintf(handoff,32768,L"\"%ls\" --game-wait --token %ls",helper,token);
+    LocalFree(arguments);
+    if(length_handoff<0){SetLastError(ERROR_INVALID_PARAMETER);return FALSE;}
+    /* Preserve the official launcher's live credential even when Remember
+     * Login is off. The helper sends it only over authenticated loopback IPC. */
     return real_createprocess(helper,handoff,pa,ta,inherit,flags,NULL,directory,startup,process);
 }

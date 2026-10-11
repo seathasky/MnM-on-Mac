@@ -3,6 +3,7 @@
 #define UNICODE
 #endif
 #define _UNICODE
+#include <winsock2.h>
 #include <windows.h>
 #include <winternl.h>
 #include <tlhelp32.h>
@@ -11,6 +12,7 @@
 #include <stdlib.h>
 #include "startup_diagnostics.h"
 #include "loader_address.h"
+#include "game_session_token.h"
 typedef NTSTATUS (NTAPI *QUERY_PROCESS)(HANDLE,PROCESSINFOCLASS,PVOID,ULONG,PULONG);
 static DWORD injected[1024],family[1024];static unsigned injected_count,family_count;
 static HANDLE family_handles[1024];
@@ -30,21 +32,48 @@ static BOOL controller_expired(ULONGLONG started) {
     return current.QuadPart>last.QuadPart && current.QuadPart-last.QuadPart>200000000ULL;
 }
 static void finish_browsers(void){for(unsigned i=1;i<family_count;i++)if(family_handles[i]){if(WaitForSingleObject(family_handles[i],50)==WAIT_TIMEOUT)TerminateProcess(family_handles[i],0);CloseHandle(family_handles[i]);}}
-static int game_wait(void) {
-    WCHAR controls[32768]={0},ticket[33],request[32768],temporary[32768],result[32768],heartbeat[32768];
+static int send_game_session(LPCWSTR ticket,LPCWSTR token) {
+    WCHAR port_text[16]={0},secret[65]={0};
+    if(!GetEnvironmentVariableW(L"MNM_GAME_HANDOFF_PORT",port_text,16) ||
+       GetEnvironmentVariableW(L"MNM_GAME_HANDOFF_SECRET",secret,65)!=64 ||
+       wcsspn(secret,L"0123456789abcdefABCDEF")!=64 || !game_token_valid(token))return ERROR_INVALID_PARAMETER;
+    WCHAR *end=NULL;unsigned long port=wcstoul(port_text,&end,10);
+    if(!end || *end || port==0 || port>65535)return ERROR_INVALID_PARAMETER;
+    WSADATA data;if(WSAStartup(MAKEWORD(2,2),&data))return ERROR_CONNECTION_REFUSED;
+    SOCKET channel=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
+    if(channel==INVALID_SOCKET){WSACleanup();return ERROR_CONNECTION_REFUSED;}
+    DWORD timeout=3000;
+    setsockopt(channel,SOL_SOCKET,SO_RCVTIMEO,(const char*)&timeout,sizeof(timeout));
+    setsockopt(channel,SOL_SOCKET,SO_SNDTIMEO,(const char*)&timeout,sizeof(timeout));
+    struct sockaddr_in address={0};address.sin_family=AF_INET;
+    address.sin_addr.s_addr=htonl(INADDR_LOOPBACK);address.sin_port=htons((unsigned short)port);
+    int status=ERROR_CONNECTION_REFUSED;
+    if(connect(channel,(struct sockaddr*)&address,sizeof(address))==0) {
+        WCHAR message[17000];char bytes[17000];
+        int length=swprintf(message,17000,L"%ls\n%ls\n%ls\n",secret,ticket,token);
+        int count=length>0?WideCharToMultiByte(CP_UTF8,0,message,length,bytes,sizeof(bytes),NULL,NULL):0;
+        int sent=0;
+        while(count>0 && sent<count) {
+            int n=send(channel,bytes+sent,count-sent,0);if(n<=0)break;sent+=n;
+        }
+        if(count>0 && sent==count) {
+            char ack[3]={0};int received=0;
+            while(received<3) {int n=recv(channel,ack+received,3-received,0);if(n<=0)break;received+=n;}
+            if(received==3 && !memcmp(ack,"ok\n",3))status=0;
+        }
+        SecureZeroMemory(message,sizeof(message));SecureZeroMemory(bytes,sizeof(bytes));
+    }
+    closesocket(channel);WSACleanup();return status;
+}
+static int game_wait(LPCWSTR token) {
+    WCHAR controls[32768]={0},ticket[33],result[32768],heartbeat[32768];
     DWORD length=GetEnvironmentVariableW(L"MNM_WEBVIEW_CONTROL_DIR",controls,32768);
     if(!length || length>=32768)return ERROR_INVALID_PARAMETER;
     swprintf(ticket,33,L"%08lx%08lx%016llx",GetCurrentProcessId(),GetCurrentThreadId(),GetTickCount64());
-    if(swprintf(request,32768,L"%ls\\game-request-%ls.msg",controls,ticket)<0 ||
-       swprintf(temporary,32768,L"%ls.tmp",request)<0 ||
-       swprintf(result,32768,L"%ls\\game-result-%ls.txt",controls,ticket)<0 ||
+    if(swprintf(result,32768,L"%ls\\game-result-%ls.txt",controls,ticket)<0 ||
        swprintf(heartbeat,32768,L"%ls\\heartbeat.txt",controls)<0)return ERROR_INVALID_PARAMETER;
-    HANDLE file=CreateFileW(temporary,GENERIC_WRITE,0,NULL,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,NULL);
-    if(file==INVALID_HANDLE_VALUE)return ERROR_ACCESS_DENIED;
-    DWORD written=0;BOOL ok=WriteFile(file,"play",4,&written,NULL);CloseHandle(file);
-    if(!ok || written!=4 || !MoveFileExW(temporary,request,MOVEFILE_WRITE_THROUGH)) {
-        DeleteFileW(temporary);return ERROR_WRITE_FAULT;
-    }
+    int status=send_game_session(ticket,token);if(status)return status;
+    HANDLE file;
     ULONGLONG deadline=GetTickCount64()+300000;BOOL started=FALSE;
     for(;;) {
         file=CreateFileW(result,GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL);
@@ -53,7 +82,7 @@ static int game_wait(void) {
             if(!strcmp(value,"started"))started=TRUE;
             if(!strncmp(value,"exit:",5)) { int status=atoi(value+5);DeleteFileW(result);return status; }
         }
-        if(!started && GetTickCount64()>deadline){DeleteFileW(request);return ERROR_TIMEOUT;}
+        if(!started && GetTickCount64()>deadline)return ERROR_TIMEOUT;
         WIN32_FILE_ATTRIBUTE_DATA info;
         if(GetFileAttributesExW(heartbeat,GetFileExInfoStandard,&info)) {
             FILETIME now;GetSystemTimeAsFileTime(&now);ULARGE_INTEGER current,last;
@@ -184,7 +213,7 @@ static void queue_browser(DWORD pid,LPCWSTR dll) {
     if(!job->thread)ZeroMemory(job,sizeof(*job));
 }
 static int launcher_main(int argc,wchar_t **argv){
-    if(argc==2 && !wcscmp(argv[1],L"--game-wait"))return game_wait();
+    if(argc==4 && !wcscmp(argv[1],L"--game-wait") && !wcscmp(argv[2],L"--token"))return game_wait(argv[3]);
     if(argc==3 && (!wcscmp(argv[1],L"--close") || !wcscmp(argv[1],L"--show"))){
         if(!wcslen(argv[2]) || wcsspn(argv[2],L"0123456789abcdefABCDEF")!=wcslen(argv[2]) || wcslen(argv[2])>40)return 2;
         wchar_t name[128];swprintf(name,128,!wcscmp(argv[1],L"--close")?L"Local\\MnMWebViewStop_%ls":L"Local\\MnMWebViewShow_%ls",argv[2]);

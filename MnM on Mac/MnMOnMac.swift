@@ -305,6 +305,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     private let gameModeController = GameModeController()
     private var officialControls: WindowsLauncherControls?
     private var officialControlsTimer: Timer?
+    private var officialGameCredential: String?
     private var officialGameTicket: String?
     private var footerMenuRequest = false
     private var officialMenuOpen = false
@@ -439,14 +440,17 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
                 graphicsBackendChanged()
             }
         }
-        for ticket in controls.takeGameRequests() {
+        for request in controls.takeGameRequests() {
+            let ticket = request.ticket
             guard officialGameTicket == nil, !busy, gameProcess?.isRunning != true,
                   !GameRunState.isRunning(.current) else {
                 try? controls.reportGame(ticket, exitCode: 170)
                 continue
             }
             officialGameTicket = ticket
+            officialGameCredential = request.credential
             play()
+            officialGameCredential = nil
             if gameProcess?.isRunning == true {
                 try? controls.reportGame(ticket)
             } else {
@@ -485,7 +489,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "Quit MnM on Mac", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         topItem.submenu = appMenu
-        let toolsItem = NSMenuItem()
+        let toolsItem = NSMenuItem(title: "Tools", action: nil, keyEquivalent: "")
         let toolsMenu = NSMenu(title: "Tools")
         toolsMenu.addItem(withTitle: "Open MnM Install Directory", action: #selector(openInstallDirectory), keyEquivalent: "").target = self
         toolsMenu.addItem(withTitle: "Choose Game Folder…", action: #selector(chooseFolder), keyEquivalent: "").target = self
@@ -1316,10 +1320,16 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         guard !busy, !installingAppUpdate, storageFailure == nil else { return }
         let officialRequest = officialGameTicket != nil && usesOfficialLauncher
         if patcherProcess?.isRunning == true && !officialRequest { update(); return }
-        let launchReadiness = officialRequest ? WineRuntime.readiness : state
+        let launchReadiness = officialRequest ? WineRuntime.readiness(requiringSavedLogin: false) : state
         switch LauncherStep(readiness: launchReadiness) {
         case .setup: setupWine(); return
-        case .update: update(); return
+        case .update:
+            if officialRequest {
+                lastPatcherFailure = launchReadiness == "needs_login"
+                    ? "The saved login could not be read or has expired. Try Play again, or sign in again in the official launcher."
+                    : "The game files could not be found. Use the official launcher’s Install + Repair, then try Play again."
+            } else { update() }
+            return
         default: break
         }
         guard launchReadiness == "ready", gameProcess?.isRunning != true,
@@ -1347,7 +1357,12 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             }
             let process = Process()
             process.executableURL = bridge
-            process.arguments = ["--from-app"]
+            process.arguments = officialRequest ? ["--from-session"] : ["--from-app"]
+            let credentialPipe = officialRequest ? Pipe() : nil
+            let sessionCredential = officialGameCredential
+            if officialRequest && sessionCredential == nil {
+                throw PatcherSetupError.message("The official launcher did not supply a game session. Retry Play.")
+            }
             var environment = ProcessInfo.processInfo.environment
             environment["MNM_GRAPHICS_BACKEND"] = selectedGraphicsBackend.rawValue
             environment["MNM_GRAPHICS_HUD"] = performanceHUDEnabled ? "1" : "0"
@@ -1355,9 +1370,10 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             environment["MNM_MSYNC"] = msyncEnabled ? "1" : "0"
             environment["MNM_TERMINAL_LOG"] = terminalLogEnabled ? "1" : "0"
             process.environment = environment
-            process.standardInput = FileHandle.nullDevice
+            process.standardInput = credentialPipe?.fileHandleForReading ?? FileHandle.nullDevice
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
+            let launchStarted = Date().timeIntervalSince1970
             process.terminationHandler = { [weak self] finished in
                 DispatchQueue.main.async {
                     guard let self = self, self.gameProcess === finished else { return }
@@ -1367,7 +1383,10 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
                         self.officialGameTicket = nil
                     }
                     self.gameModeController.deactivate()
-                    if finished.terminationStatus != 0 {
+                    if let result = GameRunState.read(.current), result.updated >= launchStarted, result.state == "failed" {
+                        self.lastGameStatusUpdate = result.updated
+                        self.lastPatcherFailure = result.message
+                    } else if finished.terminationStatus != 0 {
                         self.lastPatcherFailure = self.gameFailureMessage(for: finished.terminationStatus)
                     }
                     self.refresh()
@@ -1378,6 +1397,14 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             }
             gameProcess = process
             try process.run()
+            if let credentialPipe, let sessionCredential {
+                // Pipe the token only to this child; never put it in its args,
+                // environment, preferences, or the on-disk command channel.
+                DispatchQueue.global(qos: .userInitiated).async {
+                    defer { try? credentialPipe.fileHandleForWriting.close() }
+                    try? credentialPipe.fileHandleForWriting.write(contentsOf: Data(sessionCredential.utf8))
+                }
+            }
         } catch {
             gameProcess = nil
             gameModeController.deactivate()
@@ -1554,7 +1581,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         if status == 53 {
             return "Use Official Launcher's Install + Repair."
         }
-        return "The game stopped (code \(status)). Open Setup Log for details."
+        return "The game stopped (code \(status)). Try Play again, or use the official launcher’s Install + Repair if it repeats."
     }
 
     private func setRepairButtonAttention(_ active: Bool) {
@@ -1658,6 +1685,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
 
     @objc private func showPerformanceHUDMenu(_ sender: NSButton) {
         let menu = NSMenu()
+        menu.minimumWidth = 240
         let scaleMenu = NSMenu()
         let currentScale = UserDefaults.standard.integer(forKey: Self.launcherScaleKey)
         for value in [0, 60, 70, 80, 90, 100, 125] {
@@ -1671,7 +1699,6 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         let scaleItem = NSMenuItem(title: "Launcher Scale", action: nil, keyEquivalent: "")
         scaleItem.submenu = scaleMenu
         menu.addItem(scaleItem)
-        menu.addItem(.separator())
         let renderer: String
         switch selectedGraphicsBackend {
         case .metal: renderer = "DXMT"
@@ -1683,51 +1710,45 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         msyncItem.target = self
         msyncItem.state = msyncEnabled ? .on : .off
         menu.addItem(msyncItem)
-        menu.addItem(.separator())
         let gameModeItem = NSMenuItem(title: "Game Mode", action: #selector(toggleGameMode), keyEquivalent: "")
         gameModeItem.target = self
         gameModeItem.state = gameModeEnabled ? .on : .off
         gameModeItem.isEnabled = gameModeController.isAvailable
+        gameModeItem.toolTip = gameModeController.isAvailable
+            ? "Applies on the next game launch."
+            : "Requires Apple’s full Xcode app."
         menu.addItem(gameModeItem)
-        menu.addItem(.separator())
         if selectedGraphicsBackend == .metal {
             let metalFXItem = NSMenuItem(title: "MetalFX Upscaling", action: #selector(toggleMetalFXUpscaling), keyEquivalent: "")
             metalFXItem.target = self
             metalFXItem.state = metalFXUpscalingEnabled ? .on : .off
             metalFXItem.toolTip = "Uses a true 1280 × 720 DXMT render surface, then MetalFX upscales it to 1920 × 1080 on the next launch."
             menu.addItem(metalFXItem)
-            menu.addItem(.separator())
         }
         let item = NSMenuItem(title: "\(renderer) Performance HUD", action: #selector(togglePerformanceHUD), keyEquivalent: "")
         item.target = self
         item.state = performanceHUDEnabled ? .on : .off
         menu.addItem(item)
-        menu.addItem(.separator())
         let terminalLogItem = NSMenuItem(title: "Terminal Log", action: #selector(toggleTerminalLog), keyEquivalent: "")
         terminalLogItem.target = self
         terminalLogItem.state = terminalLogEnabled ? .on : .off
         terminalLogItem.toolTip = "This will open a Terminal window to show live Wine output on the next game launch."
-        menu.addItem(terminalLogItem)
         menu.addItem(.separator())
-        let noteTitle = gameModeController.isAvailable
-            ? "Applies on next game launch"
-            : "Game Mode requires full Xcode"
-        let note = NSMenuItem(title: noteTitle, action: nil, keyEquivalent: "")
-        note.isEnabled = false
-        menu.addItem(note)
+        menu.addItem(terminalLogItem)
         if footerMenuRequest {
             guard !officialMenuOpen else { return }
             let location = NSEvent.mouseLocation
             officialMenuOpen = true
             NSApp.activate(ignoringOtherApps: true)
+            // Wine can keep NSApp.isActive false even after activation is
+            // requested. Never make the dropdown depend on that flag.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                guard let self = self else { return }
+                guard let self else { return }
                 defer { self.officialMenuOpen = false }
-                guard self.patcherProcess?.isRunning == true else { return }
                 menu.popUp(positioning: nil, at: location, in: nil)
             }
         } else {
-            menu.popUp(positioning: item, at: NSPoint(x: sender.bounds.midX, y: sender.bounds.maxY + 4), in: sender)
+            menu.popUp(positioning: nil, at: NSPoint(x: sender.bounds.minX, y: sender.bounds.maxY + 4), in: sender)
         }
     }
 
@@ -2023,6 +2044,8 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         do {
             if usesOfficialLauncher { officialControls = try WindowsLauncherControls() }
             let process = try installer.makeProcess(controlsDirectory: officialControls?.directory,
+                                                   gameHandoffPort: officialControls?.gameChannel.port,
+                                                   gameHandoffSecret: officialControls?.gameChannel.secret,
                                                    graphicsBackend: selectedGraphicsBackend, appVersion: installedAppVersion(),
                                                    preparationStarted: preparationStarted)
             process.terminationHandler = { [weak self] finished in
@@ -2069,6 +2092,8 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             patcherProcess = process
             try process.run()
         } catch {
+            officialControls?.finish()
+            officialControls = nil
             patcherProcess = nil
             closePatcherAfterInitialSetup = false
             patcherReadyChecks = 0

@@ -21,8 +21,8 @@ if (output/'MnMLauncherRetina.dylib').exists():
     shutil.move(str(output/'MnMLauncherRetina.dylib'),str(native_output/'MnMLauncherRetina.dylib'))
 with tempfile.TemporaryDirectory(prefix='mnm-compat-build-') as temporary:
     stage=Path(temporary)
-    subprocess.run([str(a.compiler),'-shared','-O2',str(root/'webview_bridge.c'),'-o',str(stage/'MnMWebViewBridge.dll'),'-luser32','-lgdi32'],check=True)
-    subprocess.run([str(a.compiler),'-municode','-mwindows','-O2',str(root/'windows_launcher.c'),'-o',str(stage/'MnMWindowsLauncher.exe'),'-luser32'],check=True)
+    subprocess.run([str(a.compiler),'-shared','-O2',str(root/'webview_bridge.c'),'-o',str(stage/'MnMWebViewBridge.dll'),'-luser32','-lgdi32','-lshell32'],check=True)
+    subprocess.run([str(a.compiler),'-municode','-mwindows','-O2',str(root/'windows_launcher.c'),'-o',str(stage/'MnMWindowsLauncher.exe'),'-luser32','-lws2_32'],check=True)
     subprocess.run(['xcrun','clang','-dynamiclib','-O2','-arch','x86_64','-arch','arm64','-mmacosx-version-min=14.0',str(root/'launcher_retina.m'),'-framework','Foundation','-o',str(stage/'MnMLauncherRetina.dylib')],check=True)
     subprocess.run(['/usr/bin/codesign','--force','--sign','-',str(stage/'MnMLauncherRetina.dylib')],check=True)
     helper=(stage/'MnMWindowsLauncher.exe').read_bytes()

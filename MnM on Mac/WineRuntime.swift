@@ -111,7 +111,8 @@ enum WineRuntime {
     static let supportVersion = "Template-1.0.18"
     static let d3dMetalVersion = "d3dmetal-3.0-template-1.0.18"
     static var rosettaAvailable: Bool { RosettaSetup.available }
-    static var readiness: String {
+    static var readiness: String { readiness(requiringSavedLogin: true) }
+    static func readiness(requiringSavedLogin: Bool) -> String {
         let paths = WinePaths.current
         if AppStorage.requiresMigration { return "needs_storage_migration" }
         if !rosettaAvailable { return "needs_rosetta" }
@@ -119,7 +120,7 @@ enum WineRuntime {
         if paths.engineInstalled && !paths.librariesInstalled { return "needs_libraries" }
         if !paths.installed { return "needs_wine" }
         if !paths.initialized { return "needs_prefix" }
-        if !GameSession.hasValidLogin { return "needs_login" }
+        if requiringSavedLogin && !GameSession.hasValidLogin { return "needs_login" }
         if paths.selectedGame == nil { return "needs_game" }
         return "ready"
     }
@@ -412,7 +413,7 @@ enum GameSession {
         guard FileManager.default.fileExists(atPath: database.path) else { return nil }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-        process.arguments = ["-readonly", database.path, sql]
+        process.arguments = ["-readonly", "-cmd", ".timeout 1500", database.path, sql]
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
@@ -442,8 +443,14 @@ enum GameSession {
     static var hasRecordedInstallation: Bool {
         query("SELECT EXISTS(SELECT 1 FROM game_versions LIMIT 1);") == "1"
     }
-    static func process(for arguments: [String], paths: WinePaths) throws -> Process {
+    static func process(for arguments: [String], paths: WinePaths, sessionCredential: String? = nil) throws -> Process {
         if arguments == ["--from-app"] { return try makeProcess(paths: paths) }
+        if arguments == ["--from-session"] {
+            guard let sessionCredential, isValid(sessionCredential) else {
+                throw PatcherSetupError.message("The official launcher supplied an invalid or expired game session. Sign in again and retry Play.")
+            }
+            return try makeProcess(paths: paths, credential: sessionCredential)
+        }
         guard arguments.count == 4, arguments[0] == "--from-patcher", arguments[2] == "--token" else {
             throw PatcherSetupError.message("The game launch request was not recognized.")
         }

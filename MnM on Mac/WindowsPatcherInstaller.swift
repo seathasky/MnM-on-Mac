@@ -77,7 +77,7 @@ struct WindowsPatcherInstaller {
         return "Z:" + url.path.replacingOccurrences(of: "/", with: "\\")
     }
 
-    func makeProcess(controlsDirectory: URL? = nil, graphicsBackend: GraphicsBackend = .d3dMetal,
+    func makeProcess(controlsDirectory: URL? = nil, gameHandoffPort: UInt16? = nil, gameHandoffSecret: String? = nil, graphicsBackend: GraphicsBackend = .d3dMetal,
                      appVersion: String = "2.0.0", preparationStarted: TimeInterval? = nil) throws -> Process {
         guard ready else { throw PatcherSetupError.message("The Windows launcher needs its compatibility update first.") }
         let process = Process()
@@ -106,6 +106,11 @@ struct WindowsPatcherInstaller {
         launchEnvironment["MNM_LAUNCHER_DIAGNOSTICS"] = try Self.windowsPath(diagnostics)
         launchEnvironment["MNM_LAUNCHER_NATIVE_LOG"] = diagnostics.path
         if let controlsDirectory {
+            guard let gameHandoffPort, let gameHandoffSecret else {
+                throw PatcherSetupError.message("The game session channel is not ready. Reopen the launcher.")
+            }
+            launchEnvironment["MNM_GAME_HANDOFF_PORT"] = String(gameHandoffPort)
+            launchEnvironment["MNM_GAME_HANDOFF_SECRET"] = gameHandoffSecret
             launchEnvironment["MNM_WEBVIEW_FOOTER"] = "1"
             launchEnvironment["MNM_WEBVIEW_CONTROL_DIR"] = try Self.windowsPath(controlsDirectory)
             launchEnvironment["MNM_APP_VERSION"] = appVersion
