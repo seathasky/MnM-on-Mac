@@ -48,11 +48,13 @@ private struct GitHubRelease: Decodable {
     let tagName: String
     let htmlURL: URL
     let assets: [GitHubAsset]
+    let body: String?
 
     enum CodingKeys: String, CodingKey {
         case tagName = "tag_name"
         case htmlURL = "html_url"
         case assets
+        case body
     }
 }
 
@@ -282,6 +284,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     private var availableReleaseURL: URL?
     private var availableAssetURL: URL?
     private var availableAppVersion: String?
+    private var availableReleaseNotes: String?
     private var updatePromptShown = false
     private var installingAppUpdate = false
     private var checkingAppUpdate = false
@@ -938,6 +941,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     private func showInstalledVersion() {
         availableReleaseURL = nil
         availableAppVersion = nil
+        availableReleaseNotes = nil
         versionButton.target = nil
         versionButton.action = nil
         versionButton.attributedTitle = NSAttributedString(
@@ -971,6 +975,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
                       self.isNewerVersion(release.tagName, than: currentVersion) else { return }
                 let version = release.tagName.lowercased().hasPrefix("v") ? String(release.tagName.dropFirst()) : release.tagName
                 self.availableAppVersion = version
+                self.availableReleaseNotes = release.body
                 self.availableAssetURL = release.assets.first(where: {
                     $0.name.lowercased().hasSuffix(".zip") && $0.browserDownloadURL.scheme == "https"
                     && $0.browserDownloadURL.host == "github.com"
@@ -998,9 +1003,51 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         alert.alertStyle = .informational
         alert.messageText = "Update Available"
         alert.informativeText = "MnM on Mac \(version) is ready to install. The app will close briefly, replace the current version, and reopen automatically."
+        alert.accessoryView = updateReleaseNotesView(version: version)
         alert.addButton(withTitle: "Install Update")
         alert.addButton(withTitle: "Later")
         if alert.runForegroundModal() == .alertFirstButtonReturn { installAvailableUpdate() }
+    }
+
+    private func updateReleaseNotesView(version: String) -> NSView {
+        // Release notes are untrusted display text, never HTML or executable content.
+        // Bound their size and scroll within the prompt so long notes cannot
+        // push Install/Later off a small screen.
+        let trimmed = (availableReleaseNotes ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let notes = trimmed.isEmpty ? "No changelog was provided for this release." : String(trimmed.prefix(20_000))
+        let width: CGFloat = 400
+        let screenHeight = (NSApp.keyWindow?.screen ?? NSScreen.main)?.visibleFrame.height ?? 800
+        let height = min(CGFloat(220), max(CGFloat(80), screenHeight - 400))
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height + 28))
+        let heading = NSTextField(labelWithString: "What’s new in \(version)")
+        heading.font = .systemFont(ofSize: 13, weight: .semibold)
+        heading.frame = NSRect(x: 0, y: height + 8, width: width, height: 20)
+        content.addSubview(heading)
+
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.borderType = .bezelBorder
+        scroll.autohidesScrollers = true
+        let text = NSTextView(frame: scroll.contentView.bounds)
+        text.isEditable = false
+        text.isSelectable = true
+        text.isRichText = false
+        text.font = .systemFont(ofSize: 12)
+        text.textColor = .labelColor
+        text.backgroundColor = .textBackgroundColor
+        text.textContainerInset = NSSize(width: 8, height: 8)
+        text.minSize = NSSize(width: 0, height: height)
+        text.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        text.isVerticallyResizable = true
+        text.isHorizontallyResizable = false
+        text.autoresizingMask = [.width]
+        text.textContainer?.containerSize = NSSize(width: scroll.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
+        text.textContainer?.widthTracksTextView = true
+        text.string = notes
+        scroll.documentView = text
+        content.addSubview(scroll)
+        return content
     }
 
     private func installAvailableUpdate() {
