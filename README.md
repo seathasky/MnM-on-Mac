@@ -6,7 +6,7 @@ MnM on Mac is the **semi official macOS launcher for [Monsters & Memories](https
 
 The app sets up a self contained Wine environment, no CrossOver installation required. Version 2.0 uses the official launcher for signing in, installing, updating, repairing, and playing, with Mac controls attached beneath its window.
 
-> **Beta:** Report problems through [GitHub Issues](https://github.com/seathasky/MnM-on-Mac/issues) or [Seathasky Dev Discord](https://discord.gg/9w6ZdaksDX).
+> **Beta:** Report problems through [GitHub Issues](https://github.com/seathasky/MnM-on-Mac/issues) or [Seathasky Dev Discord](https://discord.gg/9w6ZdaksDX) or the official [MnM Discord](https://discord.com/channels/847846851478945802/1517757851374977164)
 
 ## Features
 
