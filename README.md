@@ -2,15 +2,15 @@
 
 ![MnM on Mac](https://raw.githubusercontent.com/seathasky/MnM-on-Mac/refs/heads/main/Preview.png)
 
-MnM on Mac is an independent community app for playing [Monsters & Memories](https://monstersandmemories.com/) on macOS.
+MnM on Mac is the **semi official macOS launcher for [Monsters & Memories](https://monstersandmemories.com/)**, developed and maintained by MnM developer **Seathasky** as a community supported solution until the official native Apple Silicon launcher is ready.
 
-The app sets up a self-contained Wine environment...no CrossOver installation required. Version 2.0 uses the official launcher for signing in, installing, updating, repairing, and playing, with Mac controls attached beneath its window.
+The app sets up a self contained Wine environment, no CrossOver installation required. Version 2.0 uses the official launcher for signing in, installing, updating, repairing, and playing, with Mac controls attached beneath its window.
 
 > **Beta:** Report problems through [GitHub Issues](https://github.com/seathasky/MnM-on-Mac/issues) or [Seathasky Dev Discord](https://discord.gg/9w6ZdaksDX).
 
 ## Features
 
-- Apple silicon support and guided setup
+- Apple Silicon support and guided setup
 - D3DMetal, DXMT, and DXVK graphics options
 - MetalFX Upscaling with DXMT
 - macOS Game Mode controls, where supported
@@ -48,7 +48,9 @@ Use **Game Folder** to locate the game installation.
 
 ## Credits
 
-Monsters & Memories and its artwork belong to the official development team. MnM on Mac is not affiliated with or endorsed by them.
+Monsters & Memories and its artwork belong to the official development team.
+
+MnM on Mac is developed and maintained by **Seathasky, a Monsters & Memories developer**, as a semi-official macOS solution until the official native Apple Silicon launcher becomes available.
 
 Built with work from WineHQ, Sikarugir, DXMT, and wine-msync contributors. Full acknowledgements and licenses are available inside the app.
 
