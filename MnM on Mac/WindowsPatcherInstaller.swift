@@ -5,6 +5,14 @@ import CryptoKit
 /// A dedicated launcher runtime keeps compatibility changes out of game Wine
 /// prefixes and graphics drivers. Both upgrades and first installs use this path.
 struct WindowsPatcherInstaller {
+    private struct CompatibilityManifest: Decodable, Equatable {
+        let version: String
+        let wine: String
+        var files: [String: String]
+    }
+
+    private static let nativeRendererName = "MnMLauncherRetina.dylib"
+
     static let version = "mnm-webview2-1"
     static let installerURL = URL(string: "https://pub-f06cad9ebbcd412bb0f4ff64f0f6a3d7.r2.dev/launcher_v2/installer/Monsters%20%26%20Memories%20setup.exe")!
     let paths: WinePaths
@@ -25,7 +33,7 @@ struct WindowsPatcherInstaller {
     var engine: URL { runtime.appendingPathComponent("engine", isDirectory: true) }
     var prefix: URL { paths.support.appendingPathComponent("Prefix-Launcher", isDirectory: true) }
     var wine: URL { engine.appendingPathComponent("bin/" + (paths.wine?.lastPathComponent ?? "wine")) }
-    private var retinaRenderer: URL { assets.deletingLastPathComponent().appendingPathComponent("MnMLauncherRetina.dylib") }
+    private var retinaRenderer: URL { assets.deletingLastPathComponent().appendingPathComponent(Self.nativeRendererName) }
     private var manifest: URL { assets.appendingPathComponent("manifest.json") }
     private var runtimeMarker: URL { runtime.appendingPathComponent("installed-manifest.json") }
     private var launcherMarker: URL { workingDirectory.appendingPathComponent(".mnm-windows-launcher-ready") }
@@ -33,7 +41,8 @@ struct WindowsPatcherInstaller {
     // The launcher-only Cocoa bridge keeps Wine's 2x mapping stable across
     // resolution changes. Window fitting still uses live macOS usable bounds.
     private var launcherDPI: Int { 192 }
-    private var displayConfiguration: String { "startup=4;retina=locked;dpi=192" }
+    static let webViewArguments = "--disable-gpu --disable-features=ForceSWDCompWhenDCompFallbackRequired,RemoveRedirectionBitmap --no-sandbox"
+    private var displayConfiguration: String { "startup=4;retina=locked;dpi=192;webview=" + Self.webViewArguments }
 
     /// Distinguish first-time setup from a bundled compatibility refresh.
     /// An existing launcher can be updated quietly; this never skips `ready`
@@ -45,11 +54,24 @@ struct WindowsPatcherInstaller {
         (try? String(contentsOf: launcherMarker, encoding: .utf8)) == Self.version
     }
 
+    private func installedEngineMatches(_ bundled: Data) -> Bool {
+        guard !bundled.isEmpty, let installed = try? Data(contentsOf: runtimeMarker) else { return false }
+        if bundled == installed { return true }
+        let decoder = JSONDecoder()
+        guard var current = try? decoder.decode(CompatibilityManifest.self, from: bundled),
+              let previous = try? decoder.decode(CompatibilityManifest.self, from: installed),
+              current.version == Self.version,
+              current.files[Self.nativeRendererName] != nil,
+              let previousRenderer = previous.files[Self.nativeRendererName] else { return false }
+        current.files[Self.nativeRendererName] = previousRenderer
+        return current == previous
+    }
+
     var ready: Bool {
-        guard let bundled = try? Data(contentsOf: manifest), !bundled.isEmpty else { return false }
+        guard let bundled = try? Data(contentsOf: manifest) else { return false }
         return FileManager.default.isExecutableFile(atPath: wine.path) &&
         FileManager.default.fileExists(atPath: executable.path) &&
-        bundled == (try? Data(contentsOf: runtimeMarker)) &&
+        installedEngineMatches(bundled) &&
         (try? String(contentsOf: launcherMarker, encoding: .utf8)) == Self.version &&
         (try? String(contentsOf: displayMarker, encoding: .utf8)) == displayConfiguration &&
         FileManager.default.fileExists(atPath: prefix.appendingPathComponent("system.reg").path)
@@ -80,6 +102,15 @@ struct WindowsPatcherInstaller {
     func makeProcess(controlsDirectory: URL? = nil, gameHandoffPort: UInt16? = nil, gameHandoffSecret: String? = nil, graphicsBackend: GraphicsBackend = .d3dMetal,
                      appVersion: String = "2.0.0", preparationStarted: TimeInterval? = nil) throws -> Process {
         guard ready else { throw PatcherSetupError.message("The Windows launcher needs its compatibility update first.") }
+        let bundled = try Data(contentsOf: manifest)
+        if bundled != (try? Data(contentsOf: runtimeMarker)) {
+            let package = try JSONDecoder().decode(CompatibilityManifest.self, from: bundled)
+            guard let digest = package.files[Self.nativeRendererName], installedEngineMatches(bundled) else {
+                throw PatcherSetupError.message("The Windows launcher needs its compatibility update first.")
+            }
+            try verifyRetinaRenderer(digest: digest)
+            try bundled.write(to: runtimeMarker, options: .atomic)
+        }
         let process = Process()
         process.executableURL = wine
         process.currentDirectoryURL = workingDirectory
@@ -180,7 +211,7 @@ struct WindowsPatcherInstaller {
         if !paths.initialized {
             try WineInstaller(paths: paths).install(approveRosettaInstallation: approveRosettaInstallation, progress: progress)
         }
-        if (try? Data(contentsOf: manifest)) != (try? Data(contentsOf: runtimeMarker)) {
+        if !installedEngineMatches(try Data(contentsOf: manifest)) {
             progress("Updating launcher compatibility…")
             try installEngine()
         }
@@ -197,7 +228,7 @@ struct WindowsPatcherInstaller {
             if manager.fileExists(atPath: target.path) { try manager.removeItem(at: target) }
             try manager.copyItem(at: assets.appendingPathComponent(name), to: target)
         }
-        let flags = "--disable-gpu --disable-features=ForceSWDCompWhenDCompFallbackRequired,RemoveRedirectionBitmap"
+        let flags = Self.webViewArguments
         for view in ["32", "64"] {
             try WineRuntime.runQuiet(wine, ["reg.exe", "add", "HKLM\\Software\\Policies\\Microsoft\\Edge\\WebView2\\AdditionalBrowserArguments",
                                           "/v", "mnm_launcher.exe", "/t", "REG_SZ", "/d", flags, "/f", "/reg:" + view],

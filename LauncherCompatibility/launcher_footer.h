@@ -11,6 +11,7 @@ static HFONT footer_font, footer_version_font;
 static BOOL footer_busy, footer_update_available;
 static RECT footer_work_areas[16];
 static int footer_work_count;
+static BOOL footer_state_changed=TRUE;
 static void footer_read_state(void) {
     static ULONGLONG next;ULONGLONG now=GetTickCount64();if(now<next)return;next=now+250;
     if(!footer_controls[0] || !footer_window)return;
@@ -19,6 +20,9 @@ static void footer_read_state(void) {
     if(file==INVALID_HANDLE_VALUE)return;
     char data[2049]={0};DWORD count=0;BOOL read=ReadFile(file,data,2048,&count,NULL);CloseHandle(file);
     if(!read || !count || count>=2048)return;
+    static char previous[2049];
+    if(!strcmp(previous,data))return;
+    memcpy(previous,data,sizeof(previous));footer_state_changed=TRUE;
     char backend[32]={0},version[32]={0};char *entry=strstr(data,"backend=");
     if(entry && sscanf(entry,"backend=%31[^\n]",backend)==1 && (!strcmp(backend,"metal") || !strcmp(backend,"d3dmetal") || !strcmp(backend,"dxvk")))
         MultiByteToWideChar(CP_UTF8,0,backend,-1,footer_backend,32);
@@ -56,14 +60,10 @@ static void footer_command(const char *command) {
     CloseHandle(file);
     if(!ok || written!=strlen(command) || !MoveFileExW(temporary,target,MOVEFILE_WRITE_THROUGH))DeleteFileW(temporary);
 }
-static void footer_label(HDC dc,LPCWSTR text,int x,int y,int width,COLORREF color) {
-    RECT bounds={x,y,x+width,y+24};SetTextColor(dc,color);
-    DrawTextW(dc,text,-1,&bounds,DT_SINGLELINE|DT_VCENTER|DT_LEFT|DT_NOPREFIX);
-}
-static void footer_gear(HDC dc,int cx,int cy) {
+static void footer_gear(HDC dc,int cx,int cy,COLORREF color) {
     // Draw shapes, not a Unicode glyph: this works without any symbol fonts.
     static const POINT spokes[8]={{0,-8},{6,-6},{8,0},{6,6},{0,8},{-6,6},{-8,0},{-6,-6}};
-    HPEN pen=CreatePen(PS_SOLID,2,RGB(94,200,103));HGDIOBJ previous=SelectObject(dc,pen);
+    HPEN pen=CreatePen(PS_SOLID,2,color);HGDIOBJ previous=SelectObject(dc,pen);
     HGDIOBJ brush=SelectObject(dc,GetStockObject(NULL_BRUSH));
     for(int i=0;i<8;i++) {
         MoveToEx(dc,cx+spokes[i].x*5/8,cy+spokes[i].y*5/8,NULL);
@@ -118,92 +118,230 @@ static void footer_discord_logo(HDC dc,int x,int y,COLORREF color) {
     EndPath(dc);FillPath(dc);SetPolyFillMode(dc,oldfill);
     SelectObject(dc,oldbrush);SelectObject(dc,oldpen);DeleteObject(brush);
 }
-static void footer_button(HDC dc,LPCWSTR text,int left,int right,COLORREF fill,COLORREF color) {
-    HBRUSH brush=CreateSolidBrush(fill);HPEN pen=CreatePen(PS_SOLID,1,RGB(76,76,76));
-    HGDIOBJ oldbrush=SelectObject(dc,brush),oldpen=SelectObject(dc,pen);
-    RoundRect(dc,left,49,right,80,10,10);
-    SelectObject(dc,oldbrush);SelectObject(dc,oldpen);DeleteObject(brush);DeleteObject(pen);
-    BOOL discord=!wcscmp(text,L"Seathasky Dev Discord");
-    BOOL dropdown=!wcscmp(text,L"Wine Config");
-    if(discord)footer_discord_logo(dc,left+12,55,color);
-    if(dropdown) {
-        HPEN arrow=CreatePen(PS_SOLID,2,color);HGDIOBJ previous=SelectObject(dc,arrow);
-        MoveToEx(dc,right-19,62,NULL);LineTo(dc,right-15,66);LineTo(dc,right-11,62);
-        SelectObject(dc,previous);DeleteObject(arrow);
+enum FooterAction {
+    FOOTER_NONE, FOOTER_GRAPHICS, FOOTER_OPTIONS, FOOTER_FOLDER,
+    FOOTER_WINE, FOOTER_DISCORD, FOOTER_ABOUT, FOOTER_LEGAL, FOOTER_UPDATE,
+    FOOTER_ACTION_COUNT
+};
+
+static enum FooterAction footer_hover;
+
+static RECT footer_action_bounds(enum FooterAction action, int width) {
+    switch(action) {
+    case FOOTER_GRAPHICS: return (RECT){88, 9, 313, 39};
+    case FOOTER_OPTIONS:  return (RECT){321, 9, 422, 39};
+    case FOOTER_FOLDER:   return (RECT){width-250, 9, width-138, 39};
+    case FOOTER_WINE:     return (RECT){width-130, 9, width-18, 39};
+    case FOOTER_DISCORD:  return (RECT){width-257, 49, width-153, 79};
+    case FOOTER_ABOUT:    return (RECT){width-145, 49, width-85, 79};
+    case FOOTER_LEGAL:    return (RECT){width-77, 49, width-18, 79};
+    case FOOTER_UPDATE:   return (RECT){width-441, 49, width-271, 79};
+    default: return (RECT){0};
     }
-    RECT label={left+(discord?44:8),49,right-(dropdown?25:8),80};SetTextColor(dc,color);
-    DrawTextW(dc,text,-1,&label,DT_SINGLELINE|DT_VCENTER|DT_CENTER|DT_NOPREFIX);
 }
-static LRESULT CALLBACK footer_proc(HWND window,UINT message,WPARAM w,LPARAM l) {
-    if(message==WM_ERASEBKGND)return 1;
-    if(message==WM_PAINT) {
-        PAINTSTRUCT paint;HDC dc=BeginPaint(window,&paint);RECT bounds;real_getclientrect(window,&bounds);
-        HBRUSH background=CreateSolidBrush(RGB(29,29,29));FillRect(dc,&bounds,background);DeleteObject(background);
-        int physical_width=bounds.right,physical_height=bounds.bottom;
-        bounds.right=MulDiv(physical_width,96,footer_dpi);bounds.bottom=FOOTER_HEIGHT;
-        SetMapMode(dc,MM_ANISOTROPIC);SetWindowExtEx(dc,bounds.right,FOOTER_HEIGHT,NULL);
-        SetViewportExtEx(dc,physical_width,physical_height,NULL);
-        HPEN line=CreatePen(PS_SOLID,1,RGB(65,65,65));HGDIOBJ oldpen=SelectObject(dc,line);
-        MoveToEx(dc,0,0,NULL);LineTo(dc,bounds.right,0);SelectObject(dc,oldpen);DeleteObject(line);
-        HGDIOBJ oldfont=SelectObject(dc,footer_font);SetBkMode(dc,TRANSPARENT);
-        footer_label(dc,L"Graphics",20,13,70,RGB(215,215,215));
-        HBRUSH field=CreateSolidBrush(RGB(53,53,53));HGDIOBJ oldbrush=SelectObject(dc,field);
-        oldpen=SelectObject(dc,GetStockObject(NULL_PEN));RoundRect(dc,90,10,350,41,8,8);
-        SelectObject(dc,oldpen);SelectObject(dc,oldbrush);DeleteObject(field);
-        LPCWSTR renderer=!wcscmp(footer_backend,L"metal")?L"DXMT":!wcscmp(footer_backend,L"dxvk")?L"DXVK (Experimental)":L"D3DMetal (Recommended)";
-        footer_label(dc,renderer,102,13,228,RGB(235,235,235));
-        HPEN arrow=CreatePen(PS_SOLID,2,RGB(215,215,215));oldpen=SelectObject(dc,arrow);
-        MoveToEx(dc,331,22,NULL);LineTo(dc,336,27);LineTo(dc,341,22);
-        SelectObject(dc,oldpen);DeleteObject(arrow);
-        footer_gear(dc,383,25);
-        WCHAR version[64];swprintf(version,64,footer_update_available?L"App Update Available":L"MnM on Mac %ls",footer_version);
-        SelectObject(dc,footer_version_font);
-        RECT version_bounds={bounds.right-280,10,bounds.right-20,41};
-        SetTextColor(dc,footer_update_available?RGB(94,200,103):RGB(215,215,215));
-        DrawTextW(dc,version,-1,&version_bounds,DT_SINGLELINE|DT_VCENTER|DT_RIGHT|DT_NOPREFIX);
-        SelectObject(dc,footer_font);
-        footer_button(dc,L"Game Folder",90,220,RGB(45,45,45),RGB(235,235,235));
-        footer_button(dc,L"Wine Config",230,350,RGB(45,45,45),RGB(235,235,235));
-        footer_button(dc,L"Seathasky Dev Discord",bounds.right-396,bounds.right-171,RGB(45,45,45),RGB(88,101,242));
-        footer_button(dc,L"About",bounds.right-156,bounds.right-88,RGB(45,45,45),RGB(255,140,45));
-        footer_button(dc,L"Legal",bounds.right-78,bounds.right-20,RGB(45,45,45),RGB(255,140,45));
-        SelectObject(dc,oldfont);EndPaint(window,&paint);return 0;
+
+static BOOL footer_action_enabled(enum FooterAction action) {
+    switch(action) {
+    case FOOTER_NONE: return FALSE;
+    case FOOTER_GRAPHICS:
+    case FOOTER_OPTIONS: return !footer_busy;
+    case FOOTER_UPDATE: return footer_update_available;
+    default: return TRUE;
     }
-    if(message==WM_LBUTTONUP) {
-        int x=MulDiv((short)LOWORD(l),96,footer_dpi),y=MulDiv((short)HIWORD(l),96,footer_dpi);RECT bounds;real_getclientrect(window,&bounds);
-        bounds.right=MulDiv(bounds.right,96,footer_dpi);
-        if(y<46 && x>=bounds.right-280 && footer_update_available){footer_command("app-update");return 0;}
-        if(y<46 && x<410 && footer_busy)return 0;
-        if(y<46 && x>=90 && x<350) {
-            SetForegroundWindow(footer_root);
-            HMENU menu=CreatePopupMenu();
-            AppendMenuW(menu,MF_STRING|(!wcscmp(footer_backend,L"d3dmetal")?MF_CHECKED:0),1,L"D3DMetal (Recommended)");
-            AppendMenuW(menu,MF_STRING|(!wcscmp(footer_backend,L"metal")?MF_CHECKED:0),2,L"DXMT");
-            AppendMenuW(menu,MF_STRING|(!wcscmp(footer_backend,L"dxvk")?MF_CHECKED:0),3,L"DXVK (Experimental)");
-            POINT point={MulDiv(90,footer_dpi,96),MulDiv(42,footer_dpi,96)};ClientToScreen(window,&point);
-            UINT selected=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_NONOTIFY,point.x,point.y,0,window,NULL);
-            DestroyMenu(menu);
-            PostMessageW(footer_root,WM_NULL,0,0);
-            if(selected)footer_command(selected==1?"graphics:d3dmetal":selected==2?"graphics:metal":"graphics:dxvk");
-        } else if(y<46 && x>=360 && x<410)footer_command("options");
-        else if(y>=49 && y<80 && x>=bounds.right-396 && x<bounds.right-171)footer_command("discord");
-        else if(y>=49 && y<80 && x>=90 && x<220)footer_command("game-folder");
-        else if(y>=49 && y<80 && x>=230 && x<350) {
-            SetForegroundWindow(footer_root);
-            HMENU menu=CreatePopupMenu();
-            AppendMenuW(menu,MF_STRING,1,L"Wine Config");
-            AppendMenuW(menu,MF_STRING,2,L"Open Registry");
-            POINT point={MulDiv(230,footer_dpi,96),MulDiv(80,footer_dpi,96)};ClientToScreen(window,&point);
-            UINT selected=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_NONOTIFY,point.x,point.y,0,window,NULL);
-            DestroyMenu(menu);
-            PostMessageW(footer_root,WM_NULL,0,0);
-            if(selected)footer_command(selected==1?"wine-config":"wine-registry");
+}
+
+static enum FooterAction footer_hit(HWND window, LPARAM coordinates, int *width) {
+    RECT bounds;
+    if(!real_getclientrect(window, &bounds)) return FOOTER_NONE;
+    *width = MulDiv(bounds.right, 96, footer_dpi);
+    POINT point = {
+        MulDiv((short)LOWORD(coordinates), 96, footer_dpi),
+        MulDiv((short)HIWORD(coordinates), 96, footer_dpi)
+    };
+    for(enum FooterAction action = FOOTER_GRAPHICS; action < FOOTER_ACTION_COUNT; ++action) {
+        RECT button = footer_action_bounds(action, *width);
+        if(footer_action_enabled(action) && PtInRect(&button, point)) return action;
+    }
+    return FOOTER_NONE;
+}
+
+static void footer_surface(HDC dc, RECT bounds, COLORREF fill, COLORREF edge, int radius) {
+    HBRUSH brush = CreateSolidBrush(fill);
+    HPEN pen = CreatePen(PS_SOLID, 1, edge);
+    HGDIOBJ oldbrush = SelectObject(dc, brush), oldpen = SelectObject(dc, pen);
+    RoundRect(dc, bounds.left, bounds.top, bounds.right, bounds.bottom, radius, radius);
+    SelectObject(dc, oldbrush);
+    SelectObject(dc, oldpen);
+    DeleteObject(brush);
+    DeleteObject(pen);
+}
+
+static void footer_text(HDC dc, LPCWSTR text, RECT bounds, COLORREF color, UINT alignment) {
+    SetTextColor(dc, color);
+    DrawTextW(dc, text, -1, &bounds, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS | alignment);
+}
+
+static void footer_chevron(HDC dc, int x, int y, COLORREF color) {
+    HPEN pen = CreatePen(PS_SOLID, 2, color);
+    HGDIOBJ original = SelectObject(dc, pen);
+    MoveToEx(dc, x-4, y-2, NULL);
+    LineTo(dc, x, y+2);
+    LineTo(dc, x+5, y-3);
+    SelectObject(dc, original);
+    DeleteObject(pen);
+}
+
+static void footer_draw_action(HDC dc, enum FooterAction action, int width, LPCWSTR title) {
+    RECT bounds = footer_action_bounds(action, width);
+    BOOL enabled = footer_action_enabled(action);
+    BOOL hover = enabled && action == footer_hover;
+    COLORREF text = enabled ? RGB(234, 235, 239) : RGB(126, 130, 140);
+    COLORREF fill = hover ? RGB(58, 63, 76) : RGB(40, 43, 51);
+    COLORREF edge = hover ? RGB(100, 111, 135) : RGB(67, 72, 84);
+    if(action == FOOTER_UPDATE) {
+        text = RGB(210, 230, 255);
+        fill = hover ? RGB(45, 76, 127) : RGB(34, 57, 96);
+        edge = RGB(67, 111, 177);
+    }
+    footer_surface(dc, bounds, fill, edge, 10);
+    if(action == FOOTER_DISCORD) {
+        footer_discord_logo(dc, bounds.left+9, bounds.top+6, RGB(156, 167, 255));
+        bounds.left += 32;
+    } else if(action == FOOTER_OPTIONS) {
+        footer_gear(dc, bounds.left+17, (bounds.top+bounds.bottom)/2, text);
+        bounds.left += 29;
+    } else if(action == FOOTER_GRAPHICS || action == FOOTER_WINE) {
+        footer_chevron(dc, bounds.right-13, (bounds.top+bounds.bottom)/2, text);
+        bounds.right -= 22;
+        bounds.left += 10;
+    }
+    footer_text(dc, title, bounds, text, action == FOOTER_GRAPHICS ? DT_LEFT : DT_CENTER);
+}
+
+static void footer_dock_label(HDC dc, int x, LPCWSTR badge, LPCWSTR label, COLORREF color, int width) {
+    RECT chip = {x, 55, x+18, 73};
+    footer_surface(dc, chip, color, color, 5);
+    footer_text(dc, badge, chip, RGB(255, 255, 255), DT_CENTER);
+    footer_text(dc, label, (RECT){x+23, 49, x+width, 79}, RGB(177, 183, 196), DT_LEFT);
+}
+
+static UINT footer_popup(HWND window, HMENU menu, RECT anchor) {
+    if(!menu) return 0;
+    SetForegroundWindow(footer_root);
+    POINT point = {MulDiv(anchor.left, footer_dpi, 96), MulDiv(anchor.bottom+2, footer_dpi, 96)};
+    ClientToScreen(window, &point);
+    UINT selection = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY, point.x, point.y, 0, window, NULL);
+    DestroyMenu(menu);
+    PostMessageW(footer_root, WM_NULL, 0, 0);
+    return selection;
+}
+
+static LRESULT CALLBACK footer_proc(HWND window, UINT message, WPARAM w, LPARAM l) {
+    if(message == WM_ERASEBKGND) return 1;
+    if(message == WM_PAINT) {
+        PAINTSTRUCT paint;
+        HDC dc = BeginPaint(window, &paint);
+        RECT bounds;
+        if(!real_getclientrect(window, &bounds) || bounds.right <= 0 || bounds.bottom <= 0) {
+            EndPaint(window, &paint);
+            return 0;
         }
-        else if(y>=49 && y<80 && x>=bounds.right-156 && x<bounds.right-88)footer_command("about");
-        else if(y>=49 && y<80 && x>=bounds.right-78 && x<bounds.right-20)footer_command("legal");
+        HBRUSH background = CreateSolidBrush(RGB(28, 30, 36));
+        FillRect(dc, &bounds, background);
+        DeleteObject(background);
+
+        int width = MulDiv(bounds.right, 96, footer_dpi);
+        SetMapMode(dc, MM_ANISOTROPIC);
+        SetWindowExtEx(dc, width, FOOTER_HEIGHT, NULL);
+        SetViewportExtEx(dc, bounds.right, bounds.bottom, NULL);
+        RECT status = {0, 44, width, FOOTER_HEIGHT};
+        HBRUSH statusFill = CreateSolidBrush(RGB(22, 24, 29));
+        FillRect(dc, &status, statusFill);
+        DeleteObject(statusFill);
+        HPEN separator = CreatePen(PS_SOLID, 1, RGB(56, 61, 73));
+        HGDIOBJ previousPen = SelectObject(dc, separator);
+        MoveToEx(dc, 0, 0, NULL);
+        LineTo(dc, width, 0);
+        MoveToEx(dc, 0, 44, NULL);
+        LineTo(dc, width, 44);
+        SelectObject(dc, previousPen);
+        DeleteObject(separator);
+
+        HGDIOBJ previousFont = SelectObject(dc, footer_font);
+        SetBkMode(dc, TRANSPARENT);
+        footer_text(dc, L"Graphics", (RECT){18, 9, 84, 39}, RGB(177, 183, 196), DT_LEFT);
+        LPCWSTR renderer = !wcscmp(footer_backend, L"metal") ? L"DXMT"
+            : !wcscmp(footer_backend, L"dxvk") ? L"DXVK (Experimental)" : L"D3DMetal (Recommended)";
+        footer_draw_action(dc, FOOTER_GRAPHICS, width, renderer);
+        footer_draw_action(dc, FOOTER_OPTIONS, width, L"Settings");
+        footer_draw_action(dc, FOOTER_FOLDER, width, L"Game Folder");
+        footer_draw_action(dc, FOOTER_WINE, width, L"Wine Config");
+        footer_draw_action(dc, FOOTER_DISCORD, width, L"Discord");
+        footer_draw_action(dc, FOOTER_ABOUT, width, L"About");
+        footer_draw_action(dc, FOOTER_LEGAL, width, L"Legal");
+
+        SelectObject(dc, footer_version_font);
+        footer_text(dc, L"Dock icons", (RECT){18, 49, 85, 79}, RGB(177, 183, 196), DT_LEFT);
+        footer_dock_label(dc, 91, L"L", L"Launcher", RGB(31, 89, 230), 86);
+        footer_dock_label(dc, 181, L"G", L"Game", RGB(212, 31, 41), 69);
+        if(footer_update_available) {
+            footer_draw_action(dc, FOOTER_UPDATE, width, L"App Update Available");
+        } else {
+            WCHAR version[64];
+            swprintf(version, 64, L"MnM on Mac %ls", footer_version);
+            footer_text(dc, version, footer_action_bounds(FOOTER_UPDATE, width), RGB(177, 183, 196), DT_RIGHT);
+        }
+        SelectObject(dc, previousFont);
+        EndPaint(window, &paint);
         return 0;
     }
-    return DefWindowProcW(window,message,w,l);
+    if(message == WM_MOUSEMOVE || message == WM_MOUSELEAVE) {
+        int width = 0;
+        enum FooterAction hover = message == WM_MOUSEMOVE ? footer_hit(window, l, &width) : FOOTER_NONE;
+        if(message == WM_MOUSEMOVE && footer_hover == FOOTER_NONE && hover != FOOTER_NONE) {
+            TRACKMOUSEEVENT tracking = {sizeof(tracking), TME_LEAVE, window, 0};
+            TrackMouseEvent(&tracking);
+        }
+        if(hover != footer_hover) {
+            footer_hover = hover;
+            InvalidateRect(window, NULL, FALSE);
+        }
+        return 0;
+    }
+    if(message == WM_LBUTTONUP) {
+        int width = 0;
+        enum FooterAction action = footer_hit(window, l, &width);
+        switch(action) {
+        case FOOTER_GRAPHICS: {
+            HMENU menu = CreatePopupMenu();
+            if(!menu) break;
+            AppendMenuW(menu, MF_STRING | (!wcscmp(footer_backend, L"d3dmetal") ? MF_CHECKED : 0), 1, L"D3DMetal (Recommended)");
+            AppendMenuW(menu, MF_STRING | (!wcscmp(footer_backend, L"metal") ? MF_CHECKED : 0), 2, L"DXMT");
+            AppendMenuW(menu, MF_STRING | (!wcscmp(footer_backend, L"dxvk") ? MF_CHECKED : 0), 3, L"DXVK (Experimental)");
+            UINT selected = footer_popup(window, menu, footer_action_bounds(action, width));
+            if(selected) footer_command(selected == 1 ? "graphics:d3dmetal" : selected == 2 ? "graphics:metal" : "graphics:dxvk");
+            break;
+        }
+        case FOOTER_WINE: {
+            HMENU menu = CreatePopupMenu();
+            if(!menu) break;
+            AppendMenuW(menu, MF_STRING, 1, L"Wine Config");
+            AppendMenuW(menu, MF_STRING, 2, L"Open Registry");
+            UINT selected = footer_popup(window, menu, footer_action_bounds(action, width));
+            if(selected) footer_command(selected == 1 ? "wine-config" : "wine-registry");
+            break;
+        }
+        case FOOTER_OPTIONS: footer_command("options"); break;
+        case FOOTER_FOLDER: footer_command("game-folder"); break;
+        case FOOTER_DISCORD: footer_command("discord"); break;
+        case FOOTER_ABOUT: footer_command("about"); break;
+        case FOOTER_LEGAL: footer_command("legal"); break;
+        case FOOTER_UPDATE: footer_command("app-update"); break;
+        default: break;
+        }
+        return 0;
+    }
+    return DefWindowProcW(window, message, w, l);
 }
 static void footer_attach(HWND root) {
     if(footer_window || !footer_enabled())return;
@@ -217,7 +355,7 @@ static void footer_attach(HWND root) {
     klass.hCursor=LoadCursorW(NULL,IDC_ARROW);klass.lpszClassName=L"MnMMacControls";
     if(!RegisterClassW(&klass) && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return;
     footer_font=CreateFontW(-14,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH,L"Arial");
-    footer_version_font=CreateFontW(-17,0,0,0,FW_BOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH,L"Arial");
+    footer_version_font=CreateFontW(-12,0,0,0,FW_BOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH,L"Arial");
     GetEnvironmentVariableW(L"MNM_GRAPHICS_BACKEND",footer_backend,32);
     GetEnvironmentVariableW(L"MNM_APP_VERSION",footer_version,32);
     GetEnvironmentVariableW(L"MNM_WEBVIEW_CONTROL_DIR",footer_controls,32768);

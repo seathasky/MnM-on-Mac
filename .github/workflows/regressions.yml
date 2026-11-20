@@ -1,0 +1,17 @@
+name: Regression tests
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  regressions:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Run the regression suite
+        run: bash LauncherCompatibility/run_regressions.sh

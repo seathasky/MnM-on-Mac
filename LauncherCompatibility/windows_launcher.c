@@ -13,6 +13,7 @@
 #include "startup_diagnostics.h"
 #include "loader_address.h"
 #include "game_session_token.h"
+#include "controller_lease.h"
 typedef NTSTATUS (NTAPI *QUERY_PROCESS)(HANDLE,PROCESSINFOCLASS,PVOID,ULONG,PULONG);
 static DWORD injected[1024],family[1024];static unsigned injected_count,family_count;
 static HANDLE family_handles[1024];
@@ -29,7 +30,7 @@ static BOOL controller_expired(ULONGLONG started) {
     FILETIME now;GetSystemTimeAsFileTime(&now);ULARGE_INTEGER current,last;
     current.LowPart=now.dwLowDateTime;current.HighPart=now.dwHighDateTime;
     last.LowPart=info.ftLastWriteTime.dwLowDateTime;last.HighPart=info.ftLastWriteTime.dwHighDateTime;
-    return current.QuadPart>last.QuadPart && current.QuadPart-last.QuadPart>200000000ULL;
+    return controller_lease_expired(current.QuadPart,last.QuadPart);
 }
 static void finish_browsers(void){for(unsigned i=1;i<family_count;i++)if(family_handles[i]){if(WaitForSingleObject(family_handles[i],50)==WAIT_TIMEOUT)TerminateProcess(family_handles[i],0);CloseHandle(family_handles[i]);}}
 static int send_game_session(LPCWSTR ticket,LPCWSTR token) {
@@ -88,7 +89,7 @@ static int game_wait(LPCWSTR token) {
             FILETIME now;GetSystemTimeAsFileTime(&now);ULARGE_INTEGER current,last;
             current.LowPart=now.dwLowDateTime;current.HighPart=now.dwHighDateTime;
             last.LowPart=info.ftLastWriteTime.dwLowDateTime;last.HighPart=info.ftLastWriteTime.dwHighDateTime;
-            if(current.QuadPart>last.QuadPart && current.QuadPart-last.QuadPart>600000000ULL)return ERROR_CANCELLED;
+            if(controller_lease_expired(current.QuadPart,last.QuadPart))return ERROR_CANCELLED;
         } else if(started)return ERROR_CANCELLED;
         if(GetFileAttributesW(controls)==INVALID_FILE_ATTRIBUTES)return ERROR_CANCELLED;
         Sleep(100);

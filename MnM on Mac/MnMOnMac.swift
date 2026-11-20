@@ -344,6 +344,12 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             try AppStorage.prepare()
         } catch { storageFailure = error.localizedDescription }
         if storageFailure == nil {
+            let paths = WinePaths.current
+            let anotherInstance = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
+                .contains { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && !$0.isTerminated }
+            if !anotherInstance, !GameRunState.isRunning(paths) {
+                WineSessionCleanup.cleanup(runtimeRoot: paths.support.appendingPathComponent("Runtime", isDirectory: true))
+            }
             let app = Bundle.main.bundleURL
             let runningApps = NSWorkspace.shared.runningApplications.compactMap(\.bundleURL)
             DispatchQueue.global(qos: .utility).async {
@@ -1199,7 +1205,17 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         if let availableReleaseURL { NSWorkspace.shared.open(availableReleaseURL) }
     }
 
+    private func updateDockVisibility() {
+        let hasLauncherAndGame = usesOfficialLauncher
+            && patcherProcess?.isRunning == true
+            && gameProcess?.isRunning == true
+        let policy: NSApplication.ActivationPolicy = hasLauncherAndGame ? .accessory : .regular
+        guard NSApp.activationPolicy() != policy else { return }
+        NSApp.setActivationPolicy(policy)
+    }
+
     private func refresh() {
+        updateDockVisibility()
         guard !busy, window != nil else { return }
         setInitialSetupMode(false)
         if let failure = storageFailure {
@@ -2126,7 +2142,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
                     if self.usesOfficialLauncher {
                         if self.lastPatcherFailure != nil {
                             self.compactSetupWindow?.show()
-                        } else if !expectedTermination && !GameRunState.isRunning(.current) {
+                        } else if !expectedTermination && self.gameExitGuard.canExitAutomatically {
                             NSApp.terminate(nil)
                         }
                     }
@@ -2464,6 +2480,22 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     }
 
     func applicationDidBecomeActive(_ notification: Notification) { refresh() }
+
+    var isGameRunning: Bool { gameProcess?.isRunning == true || GameRunState.isRunning(.current) }
+
+    private var gameExitGuard: GameExitGuard { GameExitGuard(gameIsRunning: isGameRunning) }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        gameExitGuard.canExit {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Monsters & Memories is still running"
+            alert.informativeText = "Quitting MnM on Mac now may close the game. Keep playing, or quit anyway?"
+            alert.addButton(withTitle: "Keep Playing")
+            alert.addButton(withTitle: "Quit Anyway")
+            return alert.runModal() == .alertSecondButtonReturn
+        } ? .terminateNow : .terminateCancel
+    }
     func applicationWillTerminate(_ notification: Notification) {
         gameModeController.deactivate()
         if let launcher = patcherProcess, launcher.isRunning {
@@ -2472,7 +2504,8 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
     }
     func windowWillClose(_ notification: Notification) {
         if let closing = notification.object as? NSWindow,
-           closing === compactSetupWindow?.window { NSApp.terminate(nil) }
+           closing === compactSetupWindow?.window,
+           gameExitGuard.canExitAutomatically { NSApp.terminate(nil) }
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         // The visible main window belongs to Wine. Hiding the native setup

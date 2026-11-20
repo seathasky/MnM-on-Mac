@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Darwin
 
 enum GraphicsBackend: String {
     case metal
@@ -207,134 +208,128 @@ enum WineRuntime {
             try manager.createDirectory(at: paths.kosmicKrispICD.deletingLastPathComponent(), withIntermediateDirectories: true)
             try data.write(to: paths.kosmicKrispICD, options: .atomic)
         }
-        let sourceSystem32 = paths.prefix.appendingPathComponent("drive_c/windows/system32", isDirectory: true)
-        guard manager.fileExists(atPath: sourceSystem32.path) else {
-            throw PatcherSetupError.message("The Windows environment is incomplete. Set up Wine again.")
-        }
-        let managed = ["dxgi.dll", "d3d11.dll", "d3d10core.dll"]
-        let markerValue = "\(WineRuntime.version)|dxvk-macos-1.10.3|macos-three-dll-restored"
-        let targetPrefix = usesKosmicKrisp ? paths.kosmicKrispPrefix : paths.dxvkPrefix
-        let markerName = usesKosmicKrisp ? ".mnm-kosmickrisp-ready" : ".mnm-dxvk-ready"
-
-        func prefixIsReady() -> Bool {
-            let marker = targetPrefix.appendingPathComponent(markerName)
-            guard (try? String(contentsOf: marker, encoding: .utf8)) == markerValue else { return false }
-            let system32 = targetPrefix.appendingPathComponent("drive_c/windows/system32", isDirectory: true)
-            return managed.allSatisfy {
-                manager.contentsEqual(atPath: system32.appendingPathComponent($0).path,
-                                      andPath: paths.dxvk.appendingPathComponent($0).path)
-            }
-        }
-        if prefixIsReady() { return }
-
-        let stageName = usesKosmicKrisp ? ".Prefix-KosmicKrisp" : ".Prefix-DXVK"
-        let stage = paths.support.appendingPathComponent("\(stageName)-\(UUID().uuidString)", isDirectory: true)
-        try manager.copyItem(at: paths.prefix, to: stage)
-        var stageShouldBeRemoved = true
-        defer { if stageShouldBeRemoved { try? manager.removeItem(at: stage) } }
-        let system32 = stage.appendingPathComponent("drive_c/windows/system32", isDirectory: true)
-
-        func replace(_ destination: URL, with source: URL) throws {
-            let temporary = destination.deletingLastPathComponent()
-                .appendingPathComponent(".mnm-\(destination.lastPathComponent)-\(UUID().uuidString)")
-            try manager.copyItem(at: source, to: temporary)
-            do {
-                if manager.fileExists(atPath: destination.path) {
-                    _ = try manager.replaceItemAt(destination, withItemAt: temporary)
-                } else {
-                    try manager.moveItem(at: temporary, to: destination)
-                }
-            } catch {
-                try? manager.removeItem(at: temporary)
-                throw error
-            }
-        }
-
-        for name in managed {
-            let destination = system32.appendingPathComponent(name)
-            guard manager.fileExists(atPath: destination.path) else {
-                throw PatcherSetupError.message("The Windows environment is missing \(name).")
-            }
-            try replace(destination, with: paths.dxvk.appendingPathComponent(name))
-        }
-        try markerValue.write(to: stage.appendingPathComponent(markerName), atomically: true, encoding: .utf8)
         let variant = usesKosmicKrisp ? "KosmicKrisp" : "DXVK"
         try manager.createDirectory(at: paths.graphicsLogs.appendingPathComponent(variant, isDirectory: true), withIntermediateDirectories: true)
         try manager.createDirectory(at: paths.graphicsCache.appendingPathComponent(variant, isDirectory: true), withIntermediateDirectories: true)
-
-        if manager.fileExists(atPath: targetPrefix.path) {
-            let old = paths.support.appendingPathComponent("\(stageName)-Previous-\(UUID().uuidString)", isDirectory: true)
-            try manager.moveItem(at: targetPrefix, to: old)
-            do {
-                try manager.moveItem(at: stage, to: targetPrefix)
-                stageShouldBeRemoved = false
-                try? manager.removeItem(at: old)
-            } catch {
-                try? manager.moveItem(at: old, to: targetPrefix)
-                throw error
-            }
-        } else {
-            try manager.moveItem(at: stage, to: targetPrefix)
-            stageShouldBeRemoved = false
-        }
+        try repairGraphicsPrefix(
+            target: usesKosmicKrisp ? paths.kosmicKrispPrefix : paths.dxvkPrefix,
+            base: paths.prefix,
+            dllDirectory: paths.dxvk,
+            dlls: ["dxgi.dll", "d3d11.dll", "d3d10core.dll"],
+            marker: usesKosmicKrisp ? ".mnm-kosmickrisp-ready" : ".mnm-dxvk-ready",
+            version: "\(WineRuntime.version)|dxvk-macos-1.10.3|macos-three-dll-restored"
+        )
     }
 
     private static func prepareD3DMetal(paths: WinePaths) throws {
-        let manager = FileManager.default
         guard paths.d3dMetalInstalled else {
             throw PatcherSetupError.message("D3DMetal is not installed. Select it again from Graphics.")
         }
-        let sourceSystem32 = paths.prefix.appendingPathComponent("drive_c/windows/system32", isDirectory: true)
-        guard manager.fileExists(atPath: sourceSystem32.path) else {
-            throw PatcherSetupError.message("The Windows environment is incomplete. Set up Wine again.")
-        }
-        let managed = ["dxgi.dll", "d3d11.dll"]
-        let markerValue = "\(WineRuntime.version)|\(WineRuntime.d3dMetalVersion)"
+        try repairGraphicsPrefix(
+            target: paths.d3dMetalPrefix,
+            base: paths.prefix,
+            dllDirectory: paths.d3dMetal.appendingPathComponent("wine/x86_64-windows", isDirectory: true),
+            dlls: ["dxgi.dll", "d3d11.dll"],
+            marker: ".mnm-d3dmetal-ready",
+            version: "\(WineRuntime.version)|\(WineRuntime.d3dMetalVersion)"
+        )
+    }
 
-        func prefixIsReady() -> Bool {
-            let marker = paths.d3dMetalPrefix.appendingPathComponent(".mnm-d3dmetal-ready")
-            guard let installedMarker = try? String(contentsOf: marker, encoding: .utf8),
-                  installedMarker == markerValue else { return false }
-            let system32 = paths.d3dMetalPrefix.appendingPathComponent("drive_c/windows/system32", isDirectory: true)
-            return managed.allSatisfy {
-                manager.contentsEqual(
-                    atPath: system32.appendingPathComponent($0).path,
-                    andPath: paths.d3dMetal.appendingPathComponent("wine/x86_64-windows/\($0)").path
-                )
+    private static func repairGraphicsPrefix(target: URL, base: URL, dllDirectory: URL,
+                                             dlls: [String], marker: String, version: String) throws {
+        let manager = FileManager.default
+        func exists(_ url: URL) -> Bool {
+            manager.fileExists(atPath: url.path) || (try? manager.destinationOfSymbolicLink(atPath: url.path)) != nil
+        }
+        func requireDirectory(_ url: URL) throws {
+            let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard values?.isDirectory == true, values?.isSymbolicLink == false else {
+                throw PatcherSetupError.message("The graphics prefix could not be repaired safely. Check that \(url.lastPathComponent) is a directory.")
             }
         }
-        if prefixIsReady() { return }
-
-        let stage = paths.support.appendingPathComponent(".Prefix-D3DMetal-\(UUID().uuidString)", isDirectory: true)
-        try manager.copyItem(at: paths.prefix, to: stage)
-        var stageShouldBeRemoved = true
-        defer { if stageShouldBeRemoved { try? manager.removeItem(at: stage) } }
-        let system32 = stage.appendingPathComponent("drive_c/windows/system32", isDirectory: true)
-        for name in managed {
-            let destination = system32.appendingPathComponent(name)
-            guard manager.fileExists(atPath: destination.path) else {
-                throw PatcherSetupError.message("The Windows environment is missing \(name).")
+        func system32(in prefix: URL) throws -> URL {
+            try requireDirectory(prefix)
+            var location = prefix
+            for name in ["drive_c", "windows", "system32"] {
+                location = location.appendingPathComponent(name, isDirectory: true)
+                try requireDirectory(location)
             }
-            let temporary = system32.appendingPathComponent(".mnm-\(name)-\(UUID().uuidString)")
-            try manager.copyItem(at: paths.d3dMetal.appendingPathComponent("wine/x86_64-windows/\(name)"), to: temporary)
-            _ = try manager.replaceItemAt(destination, withItemAt: temporary)
+            return location
         }
-        try markerValue.write(to: stage.appendingPathComponent(".mnm-d3dmetal-ready"), atomically: true, encoding: .utf8)
-
-        if manager.fileExists(atPath: paths.d3dMetalPrefix.path) {
-            let old = paths.support.appendingPathComponent(".Prefix-D3DMetal-Previous-\(UUID().uuidString)", isDirectory: true)
-            try manager.moveItem(at: paths.d3dMetalPrefix, to: old)
-            do {
-                try manager.moveItem(at: stage, to: paths.d3dMetalPrefix)
-                stageShouldBeRemoved = false
-                try? manager.removeItem(at: old)
-            } catch {
-                try? manager.moveItem(at: old, to: paths.d3dMetalPrefix)
-                throw error
+        func dllsMatch(in system: URL) -> Bool {
+            dlls.allSatisfy { name in
+                let installed = system.appendingPathComponent(name)
+                let values = try? installed.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                return values?.isRegularFile == true && values?.isSymbolicLink == false
+                    && manager.contentsEqual(atPath: installed.path, andPath: dllDirectory.appendingPathComponent(name).path)
             }
+        }
+
+        let hasExistingPrefix = exists(target)
+        let source = hasExistingPrefix ? target : base
+        let sourceSystem = try system32(in: source)
+        let stamp = target.appendingPathComponent(marker)
+        if hasExistingPrefix, (try? String(contentsOf: stamp, encoding: .utf8)) == version,
+           dllsMatch(in: sourceSystem) { return }
+        let registry = source.appendingPathComponent("system.reg")
+        let registryValues = try? registry.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        guard registryValues?.isRegularFile == true, registryValues?.isSymbolicLink == false else {
+            throw PatcherSetupError.message("The graphics prefix is missing its Wine registry. Its files and AppData were left in place.")
+        }
+
+        let support = target.deletingLastPathComponent()
+        let stagingParent: URL
+        if hasExistingPrefix {
+            stagingParent = support.appendingPathComponent("Graphics Prefix Backups", isDirectory: true)
+            if !exists(stagingParent) {
+                try manager.createDirectory(at: stagingParent, withIntermediateDirectories: false)
+            }
+            try requireDirectory(stagingParent)
         } else {
-            try manager.moveItem(at: stage, to: paths.d3dMetalPrefix)
-            stageShouldBeRemoved = false
+            stagingParent = support
+        }
+        let stage = stagingParent.appendingPathComponent(".\(target.lastPathComponent)-\(UUID().uuidString)", isDirectory: true)
+        var removeStage = true
+        defer { if removeStage { try? manager.removeItem(at: stage) } }
+        try manager.copyItem(at: source, to: stage)
+        let stagedSystem = try system32(in: stage)
+        for name in dlls {
+            let destination = stagedSystem.appendingPathComponent(name)
+            if exists(destination) {
+                let values = try destination.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                guard values.isRegularFile == true || values.isSymbolicLink == true else {
+                    throw PatcherSetupError.message("An unexpected item is blocking graphics repair: \(name).")
+                }
+                try manager.removeItem(at: destination)
+            }
+            try manager.copyItem(at: dllDirectory.appendingPathComponent(name), to: destination)
+        }
+        guard dllsMatch(in: stagedSystem) else {
+            throw PatcherSetupError.message("The repaired graphics files could not be verified.")
+        }
+        let stagedMarker = stage.appendingPathComponent(marker)
+        if exists(stagedMarker) {
+            let values = try stagedMarker.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            guard values.isRegularFile == true || values.isSymbolicLink == true else {
+                throw PatcherSetupError.message("An unexpected item is blocking the graphics repair marker.")
+            }
+            try manager.removeItem(at: stagedMarker)
+        }
+        try version.write(to: stagedMarker, atomically: true, encoding: .utf8)
+        if hasExistingPrefix {
+            let result = stage.path.withCString { stagedPath in
+                target.path.withCString { targetPath in
+                    renameatx_np(AT_FDCWD, stagedPath, AT_FDCWD, targetPath, UInt32(RENAME_SWAP))
+                }
+            }
+            guard result == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            removeStage = false
+            let backup = stagingParent.appendingPathComponent(String(stage.lastPathComponent.dropFirst()), isDirectory: true)
+            do { try manager.moveItem(at: stage, to: backup) }
+            catch { NSLog("Previous graphics prefix retained at %@: %@", stage.path, error.localizedDescription) }
+        } else {
+            try manager.moveItem(at: stage, to: target)
+            removeStage = false
         }
     }
 
@@ -471,10 +466,31 @@ enum GameSession {
         let showHUD = ProcessInfo.processInfo.environment["MNM_GRAPHICS_HUD"] == "1"
         let metalFXUpscaling = graphicsBackend == .metal && ProcessInfo.processInfo.environment["MNM_METALFX_UPSCALING"] == "1"
         try WineRuntime.prepareGraphicsBackend(graphicsBackend, paths: paths)
+        let target: URL
+        switch graphicsBackend {
+        case .metal: target = paths.prefix
+        case .dxvk: target = paths.dxvkPrefix
+        case .kosmicKrisp: target = paths.kosmicKrispPrefix
+        case .d3dMetal: target = paths.d3dMetalPrefix
+        }
+        _ = try? WineGamePreferences.reconcile(into: target, prefixes: [paths.prefix, paths.dxvkPrefix, paths.kosmicKrispPrefix, paths.d3dMetalPrefix])
         let process = Process()
         process.executableURL = wine
         process.currentDirectoryURL = game
-        process.environment = WineRuntime.environment(paths: paths, graphicsBackend: graphicsBackend, showHUD: showHUD, msyncEnabled: msyncEnabled, metalFXUpscaling: metalFXUpscaling)
+        var environment = WineRuntime.environment(paths: paths, graphicsBackend: graphicsBackend, showHUD: showHUD, msyncEnabled: msyncEnabled, metalFXUpscaling: metalFXUpscaling)
+        environment.removeValue(forKey: "MNM_GAME_DOCK_PREFIX")
+        let bridge = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+        let resources = bridge.deletingLastPathComponent()
+        let contents = resources.deletingLastPathComponent()
+        let app = contents.deletingLastPathComponent()
+        let renderer = resources.appendingPathComponent("MnMLauncherRetina.dylib")
+        if bridge.lastPathComponent == "MnMGameBridge", resources.lastPathComponent == "Resources",
+           contents.lastPathComponent == "Contents", app.pathExtension == "app",
+           FileManager.default.isReadableFile(atPath: renderer.path) {
+            environment["DYLD_INSERT_LIBRARIES"] = renderer.path
+            environment["MNM_GAME_DOCK_PREFIX"] = environment["WINEPREFIX"]
+        }
+        process.environment = environment
         let graphicsAPIArgument = "-force-d3d11"
         // Put Unity's renderer switch immediately after the executable. The game
         // also parses its own --token argument, so keeping the engine flags first

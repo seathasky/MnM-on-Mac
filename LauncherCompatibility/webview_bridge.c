@@ -40,6 +40,7 @@ static BOOL init_map(void){
     if(!frame)return FALSE;
     pixels=(BYTE*)frame+HEADER_BYTES;
     mutex=CreateMutexW(NULL,FALSE,mutex_name);
+    bridge_frame_message=RegisterWindowMessageW(L"MnMWebViewFrameReady");
     return !!mutex;
 }
 static HDC WINAPI bridge_getdc(HWND hwnd){
@@ -63,7 +64,8 @@ static HDC WINAPI bridge_getdc(HWND hwnd){
     return real_getdc(hwnd);
 }
 static int WINAPI bridge_releasedc(HWND hwnd,HDC dc){
-    if(browser && paint_dc && dc==paint_dc){GdiFlush();InterlockedIncrement(&frame->version);InterlockedIncrement(&frame->frames);ReleaseMutex(mutex);return 1;}
+    if(browser && paint_dc && dc==paint_dc){GdiFlush();InterlockedIncrement(&frame->version);InterlockedIncrement(&frame->frames);ReleaseMutex(mutex);
+        HWND root=GetAncestor(hwnd,GA_ROOT);if(root && bridge_frame_message)PostMessageW(root,bridge_frame_message,0,0);return 1;}
     return real_releasedc(hwnd,dc);
 }
 static BOOL CALLBACK request_browser_paint(HWND child,LPARAM unused) {
@@ -71,14 +73,37 @@ static BOOL CALLBACK request_browser_paint(HWND child,LPARAM unused) {
     if(!wcsncmp(cls,L"Chrome_",7))RedrawWindow(child,NULL,NULL,RDW_INVALIDATE|RDW_ALLCHILDREN);
     return TRUE;
 }
+static ULONG stat_ticks,stat_frames,stat_raises,stat_bytes_mb;
+static ULONGLONG stat_next;
+static void bridge_stats(void){
+    ULONGLONG now=GetTickCount64();
+    if(!stat_next){stat_next=now+60000;return;}
+    if(now<stat_next)return;
+    char line[160];snprintf(line,sizeof(line),"bridge stats 60s: ticks=%lu frames=%lu footer_raises=%lu copied_mb=%lu",
+        stat_ticks,stat_frames,stat_raises,stat_bytes_mb);
+    startup_trace(line);stat_ticks=stat_frames=stat_raises=stat_bytes_mb=0;stat_next=now+60000;
+}
+static HWND footer_cover(HWND root){
+    RECT footer_rect,r,both;if(!GetWindowRect(footer_window,&footer_rect))return NULL;
+    for(HWND child=GetWindow(root,GW_CHILD);child && child!=footer_window;child=GetWindow(child,GW_HWNDNEXT))
+        if(IsWindowVisible(child) && GetWindowRect(child,&r) && IntersectRect(&both,&r,&footer_rect))return child;
+    return NULL;
+}
 static void present_content(HWND hwnd){
     static LONG seen=-1;
+    stat_ticks++;bridge_stats();
     footer_attach(hwnd);
     footer_read_state();
-    scale_update(hwnd);
+    static ULONGLONG next_layout;ULONGLONG now=GetTickCount64();
+    if(footer_state_changed || now>=next_layout){scale_update(hwnd);next_layout=now+500;footer_state_changed=FALSE;}
     // WebView2 can create another child after the footer. Keep our controls
-    // above it even while the browser is idle and emits no new frames.
-    if(footer_window)SetWindowPos(footer_window,HWND_TOP,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
+    HWND top=footer_window?footer_cover(hwnd):NULL;
+    if(top){
+        static int reported;
+        if(reported<3){reported++;WCHAR cls[64]={0};char line[200];GetClassNameW(top,cls,64);RECT r={0};GetWindowRect(top,&r);
+            snprintf(line,sizeof(line),"footer covered by class=%ls rect=%ld,%ld,%ld,%ld visible=%d parent_is_root=%d",cls,r.left,r.top,r.right,r.bottom,top?IsWindowVisible(top):-1,top?GetParent(top)==hwnd:-1);startup_trace(line);}
+        SetWindowPos(footer_window,HWND_TOP,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);stat_raises++;
+    }
     loading_update(hwnd);
     if(!init_map())return;
     if(!frame->width){
@@ -102,9 +127,10 @@ static void present_content(HWND hwnd){
         RECT destination;
         bridge_getclientrect(hwnd,&destination);
         StretchDIBits(dc,0,0,destination.right,destination.bottom,0,0,w,h,pixels,&bi,DIB_RGB_COLORS,SRCCOPY);
+        stat_frames++;stat_bytes_mb+=(ULONG)((ULONGLONG)w*h*4/1048576);
         real_releasedc(hwnd,dc);
-        if(footer_window) {
-            SetWindowPos(footer_window,HWND_TOP,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
+        if(footer_window && footer_cover(hwnd)){
+            SetWindowPos(footer_window,HWND_TOP,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);stat_raises++;
             RedrawWindow(footer_window,NULL,NULL,RDW_INVALIDATE|RDW_UPDATENOW);
         }
         if(seen<0){SetForegroundWindow(hwnd);footer_command("ready");}seen=frame->version;
@@ -114,13 +140,16 @@ static void present_content(HWND hwnd){
 static void CALLBACK present(HWND hwnd,UINT msg,UINT_PTR id,DWORD time){
     // GetWindowRect/SetWindowPos and child-window coordinates must agree.
     // The timer's calling thread can have a different DPI context from Tauri.
-    HMODULE user=GetModuleHandleW(L"user32.dll");
-    HANDLE (WINAPI *getcontext)(HWND)=(void*)GetProcAddress(user,"GetWindowDpiAwarenessContext");
-    HANDLE (WINAPI *setcontext)(HANDLE)=(void*)GetProcAddress(user,"SetThreadDpiAwarenessContext");
+    static HANDLE (WINAPI *getcontext)(HWND),(WINAPI *setcontext)(HANDLE);static BOOL resolved;
+    if(!resolved){HMODULE user=GetModuleHandleW(L"user32.dll");
+        getcontext=(void*)GetProcAddress(user,"GetWindowDpiAwarenessContext");
+        setcontext=(void*)GetProcAddress(user,"SetThreadDpiAwarenessContext");resolved=TRUE;}
     HANDLE previous=NULL;
     if(getcontext && setcontext)previous=setcontext(getcontext(hwnd));
     present_content(hwnd);
     if(previous)setcontext(previous);
+    static BOOL slowed;
+    if(!slowed && id==TIMER_ID && bridge_frame_notified && loading_finished){SetTimer(hwnd,TIMER_ID,250,present);slowed=TRUE;logline("MnM GDI bridge: frame notifications active, timer at 250 ms\n");}
 }
 static HWND WINAPI bridge_create(DWORD ex,LPCWSTR cls,LPCWSTR title,DWORD style,int x,int y,int w,int h,HWND parent,HMENU menu,HINSTANCE inst,LPVOID param){
     HWND hwnd=real_create(ex,cls,title,style,x,y,w,h,parent,menu,inst,param);

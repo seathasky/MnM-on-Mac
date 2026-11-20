@@ -20,7 +20,7 @@ final class WindowsLauncherControls {
     let directory: URL
     private let manager = FileManager.default
     private var lastState: String?
-    private var lastHeartbeat = Date.distantPast
+    private let sessionLease: LauncherSessionLease
 
     init(support: URL = WinePaths.current.support) throws {
         gameChannel = try GameSessionChannel()
@@ -28,16 +28,12 @@ final class WindowsLauncherControls {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try manager.createDirectory(at: directory, withIntermediateDirectories: true,
                                     attributes: [.posixPermissions: 0o700])
+        sessionLease = LauncherSessionLease(directory: directory)
+        sessionLease.start()
     }
 
     func writeState(version: String, backend: GraphicsBackend, busy: Bool, updateAvailable: Bool, launcherScale: Int = 0) throws {
         guard version.count <= 24, version.allSatisfy({ $0.isNumber || $0 == "." }) else { return }
-        if Date().timeIntervalSince(lastHeartbeat) >= 2 {
-            let heartbeat = directory.appendingPathComponent("heartbeat.txt")
-            try Data("running".utf8).write(to: heartbeat, options: .atomic)
-            try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: heartbeat.path)
-            lastHeartbeat = Date()
-        }
         let scale = [0, 60, 70, 80, 90, 100, 125].contains(launcherScale) ? launcherScale : 0
         // Fit to native usable bounds, converted to the launcher's locked 2x
         // Wine coordinates. Never use Wine's cached pre-change monitor area.
@@ -89,6 +85,7 @@ final class WindowsLauncherControls {
 
     /// Only remove this launch's own private command directory after it exits.
     func finish() {
+        sessionLease.stop()
         gameChannel.finish()
         try? manager.removeItem(at: directory)
     }

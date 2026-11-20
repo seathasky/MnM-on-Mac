@@ -12,3 +12,6 @@ static int launcher_fit_percent(int requested,int width,int height,int footer,
     if(percent>125)percent=125;
     return percent;
 }
+static int launcher_layout_ready(int iconic,long clientw,long clienth) {
+    return !iconic && clientw>0 && clienth>0;
+}
