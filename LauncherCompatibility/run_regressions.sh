@@ -54,7 +54,7 @@ run_swift test_wine_session_cleanup "$source_dir/WineSessionCleanup.swift" \
 run_swift test_wine_game_preferences "$source_dir/WineGamePreferences.swift"
 MNM_TEST_APPLICATION_SUPPORT="$scratch/AppSupport" run_swift test_migration "${runtime_sources[@]}"
 run_swift test_graphics_prefix_repair "${runtime_sources[@]}"
-run_swift test_webview_launch_scope "${runtime_sources[@]}" "$source_dir/WindowsPatcherInstaller.swift" "$source_dir/LauncherRendererIntegrity.swift"
+run_swift test_webview_launch_scope "${runtime_sources[@]}" "$source_dir/WindowsPatcherInstaller.swift"
 run_swift test_update_cleanup "${runtime_sources[@]}" "$source_dir/AppUpdateInstaller.swift"
 
 /usr/bin/codesign --verify --strict "$renderer"

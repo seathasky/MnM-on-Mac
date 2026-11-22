@@ -6,6 +6,7 @@
 //
 
 import AppKit
+import ApplicationServices
 
 extension NSWindow {
     func mnmBringToFront() {
@@ -1429,6 +1430,8 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             var environment = ProcessInfo.processInfo.environment
             environment["MNM_GRAPHICS_BACKEND"] = selectedGraphicsBackend.rawValue
             environment["MNM_GRAPHICS_HUD"] = performanceHUDEnabled ? "1" : "0"
+            let canUseMouseLookWorkaround = selectedGraphicsBackend == .d3dMetal && AXIsProcessTrusted()
+            environment["MNM_GRAPHICS_MOUSE_LOOK_FIX"] = canUseMouseLookWorkaround ? "1" : "0"
             environment["MNM_METALFX_UPSCALING"] = metalFXUpscalingEnabled ? "1" : "0"
             environment["MNM_MSYNC"] = msyncEnabled ? "1" : "0"
             environment["MNM_TERMINAL_LOG"] = terminalLogEnabled ? "1" : "0"

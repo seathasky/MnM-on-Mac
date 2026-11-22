@@ -84,5 +84,35 @@ import Foundation
             }
             print("PASS \(backend.rawValue) first setup, healthy prefix, stale/missing DLL repair, AppData backup, and failure safety")
         }
+
+        let fakeWine = paths.engine.appendingPathComponent("bin/wine")
+        let recorder = #"""
+        #!/bin/sh
+        printf '%s\n' "$@" >> "$WINEPREFIX/registry-commands"
+        """#
+        try put(Data(recorder.utf8), at: fakeWine)
+        try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fakeWine.path)
+        let commands = paths.d3dMetalPrefix.appendingPathComponent("registry-commands")
+        let marker = paths.d3dMetalPrefix.appendingPathComponent(".mnm-mouse-look-workaround")
+
+        try WineRuntime.configureD3DMetalMouseLook(.metal, paths: paths, accessibilityAllowed: true)
+        try WineRuntime.configureD3DMetalMouseLook(.d3dMetal, paths: paths, accessibilityAllowed: false)
+        precondition(!manager.fileExists(atPath: commands.path) && !manager.fileExists(atPath: marker.path))
+        precondition(!manager.fileExists(atPath: paths.prefix.appendingPathComponent("registry-commands").path))
+
+        try WineRuntime.configureD3DMetalMouseLook(.d3dMetal, paths: paths, accessibilityAllowed: true)
+        try WineRuntime.configureD3DMetalMouseLook(.d3dMetal, paths: paths, accessibilityAllowed: true)
+        let applied = try String(contentsOf: commands, encoding: .utf8).split(separator: "\n").map(String.init)
+        let key = #"HKCU\Software\Wine\AppDefaults\mnm.exe\Mac Driver"#
+        let value = "UseConfinementCursorClipping"
+        precondition(applied == ["reg.exe", "add", key, "/v", value, "/t", "REG_SZ", "/d", "n", "/f"])
+        precondition(manager.fileExists(atPath: marker.path))
+
+        try WineRuntime.configureD3DMetalMouseLook(.d3dMetal, paths: paths, accessibilityAllowed: false)
+        try WineRuntime.configureD3DMetalMouseLook(.d3dMetal, paths: paths, accessibilityAllowed: false)
+        let restored = try String(contentsOf: commands, encoding: .utf8).split(separator: "\n").map(String.init)
+        precondition(restored == applied + ["reg.exe", "delete", key, "/v", value, "/f"])
+        precondition(!manager.fileExists(atPath: marker.path))
+        print("D3DMetal mouse look passed: app-specific registry setting, Accessibility gating and restoration.")
     }
 }

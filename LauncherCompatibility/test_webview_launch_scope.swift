@@ -6,7 +6,9 @@ import Foundation
         let root = manager.temporaryDirectory.appendingPathComponent("mnm-webview-scope-" + UUID().uuidString)
         defer { try? manager.removeItem(at: root) }
         let paths = WinePaths(support: root)
-        let assets = root.appendingPathComponent("Assets")
+        let app = root.appendingPathComponent("Fixture.app")
+        let resources = app.appendingPathComponent("Contents/Resources")
+        let assets = resources.appendingPathComponent("LauncherCompatibilityAssets")
         let working = root.appendingPathComponent("Game")
         let installer = WindowsPatcherInstaller(paths: paths, workingDirectory: working, assets: assets)
 
@@ -29,7 +31,19 @@ import Foundation
         let windowsDigest = files["user32.dll"]!
         try write(bundledManifest, current)
         try write(installedManifest, current)
-        try manager.copyItem(at: fixtureRenderer, to: root.appendingPathComponent("MnMLauncherRetina.dylib"))
+        let renderer = resources.appendingPathComponent("MnMLauncherRetina.dylib")
+        try manager.copyItem(at: fixtureRenderer, to: renderer)
+        let info = ["CFBundleIdentifier": "io.github.seathasky.mnmonmac.fixture",
+                    "CFBundleExecutable": "Fixture", "CFBundlePackageType": "APPL"]
+        let infoData = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+        try infoData.write(to: app.appendingPathComponent("Contents/Info.plist"))
+        let executable = app.appendingPathComponent("Contents/MacOS/Fixture")
+        try manager.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try manager.copyItem(at: URL(fileURLWithPath: CommandLine.arguments[0]), to: executable)
+        let codesign = URL(fileURLWithPath: "/usr/bin/codesign")
+        let environment = ProcessInfo.processInfo.environment
+        try WineRuntime.runQuiet(codesign, ["--force", "--sign", "-", app.path],
+                                 environment: environment, timeout: 15, step: "Sign test app")
         try write(working.appendingPathComponent(".mnm-windows-launcher-ready"), WindowsPatcherInstaller.version)
         let stamp = installer.prefix.appendingPathComponent(".mnm-launcher-display-ready")
         try write(stamp, "startup=4;retina=locked;dpi=192")
@@ -47,6 +61,20 @@ import Foundation
         let key = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"
         setenv(key, "--remote-debugging-port=9222", 1)
         precondition(installer.environment()[key] == nil)
+        try WineRuntime.runQuiet(codesign, ["--force", "--sign", "-", "--identifier", "mnm.test.swapped-renderer", renderer.path],
+                                 environment: environment, timeout: 15, step: "Re-sign test renderer")
+        try WineRuntime.runQuiet(codesign, ["--verify", "--strict", "--all-architectures", renderer.path],
+                                 environment: environment, timeout: 15, step: "Verify swapped test renderer")
+        do {
+            _ = try installer.makeProcess()
+            fatalError("A renderer that breaks the app seal must be rejected")
+        } catch {
+            let unverified = try String(contentsOf: installedManifest, encoding: .utf8)
+            precondition(unverified == prior)
+        }
+
+        try manager.removeItem(at: renderer)
+        try manager.copyItem(at: fixtureRenderer, to: renderer)
         let launch = try installer.makeProcess()
         let validated = try String(contentsOf: installedManifest, encoding: .utf8)
         precondition(validated == current)
@@ -58,6 +86,6 @@ import Foundation
         precondition(arguments.contains("--disable-features=ForceSWDCompWhenDCompFallbackRequired,RemoveRedirectionBitmap"))
         precondition(!arguments.contains("--remote-debugging-port=9222"))
         precondition(ProcessInfo.processInfo.environment[key] == "--remote-debugging-port=9222")
-        print("WebView2 startup checks passed: private Wine session, per-launcher flags, inherited switch filtering, and one-time compatibility refresh.")
+        print("WebView2 startup checks passed: private Wine session, per-launcher flags, inherited switch filtering, signed renderer verification, and one-time compatibility refresh.")
     }
 }

@@ -184,6 +184,29 @@ enum WineRuntime {
         return environment
     }
 
+    static func configureD3DMetalMouseLook(_ backend: GraphicsBackend, paths: WinePaths,
+                                            accessibilityAllowed: Bool) throws {
+        guard backend == .d3dMetal, let wine = paths.wine else { return }
+        let manager = FileManager.default
+        let marker = paths.d3dMetalPrefix.appendingPathComponent(".mnm-mouse-look-workaround")
+        let applied = manager.fileExists(atPath: marker.path)
+        guard applied != accessibilityAllowed else { return }
+
+        let key = "HKCU\\Software\\Wine\\AppDefaults\\mnm.exe\\Mac Driver"
+        let value = "UseConfinementCursorClipping"
+        var registryEnvironment = environment(paths: paths, graphicsBackend: backend)
+        registryEnvironment["WINEDEBUG"] = "-all"
+        if accessibilityAllowed {
+            try runQuiet(wine, ["reg.exe", "add", key, "/v", value, "/t", "REG_SZ", "/d", "n", "/f"],
+                         environment: registryEnvironment, timeout: 5, step: "Apply D3DMetal mouse look workaround", log: paths.setupLog)
+            try Data().write(to: marker, options: .atomic)
+        } else {
+            try runQuiet(wine, ["reg.exe", "delete", key, "/v", value, "/f"],
+                         environment: registryEnvironment, timeout: 5, step: "Restore D3DMetal mouse look defaults", log: paths.setupLog)
+            try manager.removeItem(at: marker)
+        }
+    }
+
     static func prepareGraphicsBackend(_ backend: GraphicsBackend, paths: WinePaths) throws {
         guard backend != .metal else { return }
         if backend == .d3dMetal {
@@ -466,6 +489,8 @@ enum GameSession {
         let showHUD = ProcessInfo.processInfo.environment["MNM_GRAPHICS_HUD"] == "1"
         let metalFXUpscaling = graphicsBackend == .metal && ProcessInfo.processInfo.environment["MNM_METALFX_UPSCALING"] == "1"
         try WineRuntime.prepareGraphicsBackend(graphicsBackend, paths: paths)
+        let accessibilityAllowed = ProcessInfo.processInfo.environment["MNM_GRAPHICS_MOUSE_LOOK_FIX"] == "1"
+        try? WineRuntime.configureD3DMetalMouseLook(graphicsBackend, paths: paths, accessibilityAllowed: accessibilityAllowed)
         let target: URL
         switch graphicsBackend {
         case .metal: target = paths.prefix
